@@ -8,25 +8,51 @@ permissions:
   issues: write
   contents: read
 
+concurrency:
+  group: ai-sdlc-verification-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     if: github.event.label.name == 'state:verification'
     runs-on: ubuntu-latest
     steps:
+      - name: Live-state guard
+        id: guard
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          script: |
+            const n = context.payload.issue.number;
+            const {data: issue} = await github.rest.issues.get({owner: context.repo.owner, repo: context.repo.repo, issue_number: n});
+            const labels = issue.labels.map(x => typeof x === 'string' ? x : x.name);
+            const runnable = issue.state === 'open'
+              && labels.includes('state:verification')
+              && labels.includes('agent:auditor')
+              && !labels.includes('state:done')
+              && !labels.includes('state:human-decision')
+              && !labels.includes('state:implementation')
+              && !labels.includes('state:review')
+              && !labels.includes('state:qa');
+            core.setOutput('run', runnable ? 'true' : 'false');
+            if (!runnable) core.notice(`Skipping stale verification event for issue #${n}; current labels: ${labels.join(', ')}`);
+
       - name: Checkout control plane
+        if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v5
         with:
           persist-credentials: false
           fetch-depth: 0
 
       - name: Resolve work item and implementation PR
+        if: steps.guard.outputs.run == 'true'
         id: resolve
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           script: |
             const n = context.payload.issue.number;
-            const issue = context.payload.issue;
+            const {data: issue} = await github.rest.issues.get({owner: context.repo.owner, repo: context.repo.repo, issue_number: n});
             const labels = issue.labels.map(x => typeof x === 'string' ? x : x.name);
             const {data: comments} = await github.rest.issues.listComments({owner: context.repo.owner, repo: context.repo.repo, issue_number: n, per_page: 100});
             const text = [...comments].reverse().map(c => c.body || '').join('\n');
@@ -50,6 +76,7 @@ jobs:
             core.setOutput('shared', labels.includes('shared-package') ? 'true' : 'false');
 
       - name: Fetch complete verification evidence
+        if: steps.guard.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           ISSUE_NUMBER: ${{ steps.resolve.outputs.issue_number }}
@@ -67,6 +94,7 @@ jobs:
           jq '{total_count, checks: [.check_runs[] | {name,status,conclusion,html_url}]}' /tmp/checks.json > /tmp/ci-summary.json
 
       - name: Checkout implementation PR with full history
+        if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v5
         with:
           repository: ${{ steps.resolve.outputs.repo }}
@@ -77,12 +105,14 @@ jobs:
           fetch-depth: 0
 
       - name: Produce deterministic diff evidence
+        if: steps.guard.outputs.run == 'true'
         working-directory: _target
         run: |
           git diff --name-status HEAD^1...HEAD > /tmp/pr-name-status.txt || true
           git diff --stat HEAD^1...HEAD > /tmp/pr-diff-stat.txt || true
 
       - name: Objective Auditor
+        if: steps.guard.outputs.run == 'true'
         id: codex
         uses: openai/codex-action@v1
         with:
@@ -105,6 +135,7 @@ jobs:
             Return human_required only for unresolved product/security/destructive decisions or evidence that cannot be obtained autonomously.
 
       - name: Complete, reroute, or escalate
+        if: steps.guard.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           ISSUE_NUMBER: ${{ steps.resolve.outputs.issue_number }}
@@ -115,6 +146,13 @@ jobs:
           SHARED: ${{ steps.resolve.outputs.shared }}
           VERDICT_JSON: ${{ steps.codex.outputs.final-message }}
         run: |
+          LIVE_STATE=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.state')
+          LIVE_LABELS=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '[.labels[].name] | join(",")')
+          if [ "$LIVE_STATE" != 'open' ] || [[ ",$LIVE_LABELS," != *",state:verification,"* ]] || [[ ",$LIVE_LABELS," != *",agent:auditor,"* ]]; then
+            echo "Stale verification run; current state=$LIVE_STATE labels=$LIVE_LABELS. Exiting without mutation."
+            exit 0
+          fi
+
           printf '%s' "$VERDICT_JSON" > /tmp/verdict.json
           DECISION=$(jq -r '.decision' /tmp/verdict.json)
           ROUTE=$(jq -r '.evidence_route' /tmp/verdict.json)
@@ -125,40 +163,25 @@ jobs:
           gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body-file /tmp/comment.md
           for label in state:verification agent:auditor ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label "$label" >/dev/null 2>&1 || true; done
 
-          if [ "$DECISION" = 'implementation_failure' ]; then
-            gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null
-            exit 0
-          fi
-
-          if [ "$DECISION" = 'evidence_failure' ]; then
-            case "$ROUTE" in
-              review)
-                gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:review,agent:reviewer' >/dev/null
-                ;;
-              qa)
-                gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:qa,agent:qa' >/dev/null
-                ;;
-              verification|none)
-                gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:verification,agent:auditor' >/dev/null
-                ;;
-              *)
-                gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
-                ;;
-            esac
-            exit 0
-          fi
-
-          if [ "$DECISION" = 'human_required' ]; then
-            gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
-            exit 0
-          fi
-
-          case "$RISK" in
-            critical*|high*) HUMAN=1 ;;
-            *) HUMAN=0 ;;
+          case "$DECISION" in
+            implementation_failure)
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null
+              exit 0 ;;
+            evidence_failure)
+              case "$ROUTE" in
+                review) gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:review,agent:reviewer' >/dev/null ;;
+                qa) gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:qa,agent:qa' >/dev/null ;;
+                verification|none) gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:verification,agent:auditor' >/dev/null ;;
+                *) gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null ;;
+              esac
+              exit 0 ;;
+            human_required)
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
+              exit 0 ;;
           esac
-          if [ "$SHARED" = 'true' ]; then HUMAN=1; fi
 
+          case "$RISK" in critical*|high*) HUMAN=1 ;; *) HUMAN=0 ;; esac
+          if [ "$SHARED" = 'true' ]; then HUMAN=1; fi
           if [ "$HUMAN" = '1' ]; then
             gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
             gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body "All automated gates passed. Human merge approval is required because this item is high/critical risk or changes a shared package."
