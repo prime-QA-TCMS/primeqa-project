@@ -65,8 +65,26 @@ The `ai-sdlc/` directory defines the automated engineering lifecycle:
 - `permissions-and-gates.md` — autonomous permissions, human approvals and escalation
 - `branching-and-prs.md` — branch, PR and cross-repository change strategy
 - `orchestration.md` — work selection, dispatch, dependency, retry and reporting rules
+- `github-project-model.md` — executable label model and recommended Projects v2 fields/views
+- `activation.md` — required secrets, Actions settings, branch protection and first-run procedure
 
-The implementation agent is never the final authority on its own change. Independent code review, applicable QA/security/NFR verification and objective auditing are separate stages.
+The implementation agent is never the final authority on its own change. Independent code review, QA and objective auditing are separate Codex contexts.
+
+## Executable automation
+
+`primeqa-project` now contains GitHub Actions that implement the lifecycle:
+
+- `AI-SDLC Bootstrap` — creates/ensures state, agent and control labels
+- `AI-SDLC Orchestrator` — dispatches eligible single-repository work items and controlled retries
+- reusable `Prime QA Codex Worker` — implementation branch/PR creation across Prime QA repositories
+- reusable `Prime QA Codex Review` — independent structured review gate
+- `AI-SDLC QA Gate` — independent quality/test-evidence assessment
+- `AI-SDLC Objective Verification` — final acceptance/Definition-of-Done audit and controlled merge
+- `AI-SDLC Healthcheck` — validates required credentials and repository access
+
+All existing product, shared and QA repositories contain thin dispatch/review wrappers. Low/medium-risk items may be squash-merged automatically only after all automated gates pass. High/critical or shared-package work stops at a human gate.
+
+The automation requires the GitHub-side activation described in `ai-sdlc/activation.md`, principally `OPENAI_API_KEY` and `PRIMEQA_AUTOMATION_TOKEN` Actions secrets. Live UI/API test execution additionally requires a configured test environment; the QA gate must escalate when such evidence is unavailable.
 
 ## Control-plane structure
 
