@@ -18,7 +18,8 @@ jobs:
   dispatch:
     if: >-
       (github.event_name == 'workflow_dispatch') ||
-      (github.event.label.name == 'ai:ready')
+      (github.event.label.name == 'ai:ready') ||
+      (github.event.label.name == 'ai:retry')
     runs-on: ubuntu-latest
     steps:
       - name: Resolve and validate work item
@@ -43,9 +44,8 @@ jobs:
               const match = body.match(re);
               return match ? match[1].trim() : '';
             };
-            const targets = section('Target repository/repositories')
-              .split(',').map(x => x.trim()).filter(Boolean);
-            if (targets.length !== 1) core.setFailed('Initial autonomous implementation requires exactly one target repo per Repo Task. Decompose cross-repo work first.');
+            const targets = section('Target repository/repositories').split(',').map(x => x.trim()).filter(Boolean);
+            if (targets.length !== 1) core.setFailed('Autonomous Repo Tasks require exactly one target repo. Decompose cross-repo work first.');
             const target = targets[0];
             if (!/^prime-QA-TCMS\/[A-Za-z0-9_.-]+$/.test(target)) core.setFailed(`Invalid target repo: ${target}`);
 
@@ -53,8 +53,7 @@ jobs:
             core.setOutput('target_repo', target);
             core.setOutput('issue_url', issue.html_url);
 
-            const stateLabels = labels.filter(x => x?.startsWith('state:'));
-            for (const name of stateLabels) {
+            for (const name of labels.filter(x => x?.startsWith('state:') || x?.startsWith('agent:'))) {
               await github.rest.issues.removeLabel({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name}).catch(()=>{});
             }
             await github.rest.issues.addLabels({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels:['state:implementation','agent:developer','ai:running']});
