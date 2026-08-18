@@ -16,23 +16,14 @@ on:
       PRIMEQA_AUTOMATION_TOKEN:
         required: true
 
+concurrency:
+  group: primeqa-review-${{ github.repository }}-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
 jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout PR merge result
-        uses: actions/checkout@v5
-        with:
-          ref: refs/pull/${{ inputs.pr_number }}/merge
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Checkout control plane
-        uses: actions/checkout@v5
-        with:
-          repository: prime-QA-TCMS/primeqa-project
-          token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
-          path: _control
-          persist-credentials: false
       - name: Extract central issue
         id: issue
         env:
@@ -43,12 +34,50 @@ jobs:
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "number=$NUM" >> "$GITHUB_OUTPUT"
           if [ -z "$NUM" ]; then echo 'No central issue reference found in PR body'; exit 1; fi
-      - name: Fetch central work item
+
+      - name: Live-state guard
+        id: guard
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
-        run: gh api "/repos/prime-QA-TCMS/primeqa-project/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+        run: |
+          STATE=$(gh api "/repos/prime-QA-TCMS/primeqa-project/issues/$ISSUE_NUMBER" --jq '.state')
+          LABELS=$(gh api "/repos/prime-QA-TCMS/primeqa-project/issues/$ISSUE_NUMBER" --jq '[.labels[].name] | join(",")')
+          if [ "$STATE" != 'open' ] || [[ ",$LABELS," != *",state:review,"* ]] || [[ ",$LABELS," != *",agent:reviewer,"* ]]; then
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+            echo "Stale review event; current state=$STATE labels=$LABELS"
+            exit 0
+          fi
+          echo 'run=true' >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR merge result
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/checkout@v5
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout control plane
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: prime-QA-TCMS/primeqa-project
+          token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          path: _control
+          persist-credentials: false
+
+      - name: Fetch central work item and evidence
+        if: steps.guard.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+        run: |
+          gh api "/repos/prime-QA-TCMS/primeqa-project/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+          gh api "/repos/prime-QA-TCMS/primeqa-project/issues/$ISSUE_NUMBER/comments?per_page=100" --jq '.[] | {created_at,body}' > /tmp/primeqa-work-item-comments.jsonl
+
       - name: Independent Codex review
+        if: steps.guard.outputs.run == 'true'
         id: codex
         uses: openai/codex-action@v1
         with:
@@ -60,18 +89,26 @@ jobs:
           prompt: |
             You are the independent Code Reviewer agent for Prime QA. You did NOT implement this change.
             Read _control/AGENTS.md, _control/requirements/technical-requirements.md,
-            _control/ai-sdlc/definition-of-done.md and /tmp/primeqa-work-item.md.
-            Review PR #${{ inputs.pr_number }} in ${{ github.repository }} against the work item and architecture.
-            Inspect only; do not edit files. Check correctness, security, compatibility, error handling, tests,
-            maintainability, shared-boundary compliance and whether acceptance criteria are genuinely addressed.
-            Return `approve` only when no blocking/actionable implementation findings remain.
+            _control/ai-sdlc/definition-of-done.md, /tmp/primeqa-work-item.md and
+            /tmp/primeqa-work-item-comments.jsonl. Review PR #${{ inputs.pr_number }} in ${{ github.repository }}
+            against the work item and architecture. Inspect only; do not edit files. Check correctness, security,
+            compatibility, error handling, tests, maintainability, shared-boundary compliance and whether acceptance
+            criteria are genuinely addressed. Return approve only when no blocking/actionable implementation findings remain.
+
       - name: Publish verdict and update central state
+        if: steps.guard.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           REVIEW_JSON: ${{ steps.codex.outputs.final-message }}
           ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
           PR_NUMBER: ${{ inputs.pr_number }}
         run: |
+          STATE=$(gh api "/repos/prime-QA-TCMS/primeqa-project/issues/$ISSUE_NUMBER" --jq '.state')
+          LABELS=$(gh api "/repos/prime-QA-TCMS/primeqa-project/issues/$ISSUE_NUMBER" --jq '[.labels[].name] | join(",")')
+          if [ "$STATE" != 'open' ] || [[ ",$LABELS," != *",state:review,"* ]] || [[ ",$LABELS," != *",agent:reviewer,"* ]]; then
+            echo "Stale review run; current state=$STATE labels=$LABELS. Exiting without mutation."
+            exit 0
+          fi
           printf '%s' "$REVIEW_JSON" > /tmp/review.json
           DECISION=$(jq -r '.decision' /tmp/review.json)
           SUMMARY=$(jq -r '.summary' /tmp/review.json)
