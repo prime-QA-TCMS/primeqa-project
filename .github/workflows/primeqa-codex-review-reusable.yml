@@ -1,0 +1,89 @@
+name: Reusable Prime QA Codex Review
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      pr_body:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+      PRIMEQA_AUTOMATION_TOKEN:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR merge result
+        uses: actions/checkout@v5
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout control plane
+        uses: actions/checkout@v5
+        with:
+          repository: prime-QA-TCMS/primeqa-project
+          token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          path: _control
+          persist-credentials: false
+      - name: Extract central issue
+        id: issue
+        env:
+          PR_BODY: ${{ inputs.pr_body }}
+        run: |
+          URL=$(printf '%s' "$PR_BODY" | grep -Eo 'https://github.com/prime-QA-TCMS/primeqa-project/issues/[0-9]+' | head -1 || true)
+          NUM=$(printf '%s' "$URL" | grep -Eo '[0-9]+$' || true)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "number=$NUM" >> "$GITHUB_OUTPUT"
+          if [ -z "$NUM" ]; then echo 'No central issue reference found in PR body'; exit 1; fi
+      - name: Fetch central work item
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+        run: gh api "/repos/prime-QA-TCMS/primeqa-project/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+      - name: Independent Codex review
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ':read-only'
+          safety-strategy: drop-sudo
+          output-schema: |
+            {"type":"object","properties":{"decision":{"type":"string","enum":["approve","changes_required"]},"summary":{"type":"string"},"findings":{"type":"array","items":{"type":"string"}}},"required":["decision","summary","findings"],"additionalProperties":false}
+          prompt: |
+            You are the independent Code Reviewer agent for Prime QA. You did NOT implement this change.
+            Read _control/AGENTS.md, _control/requirements/technical-requirements.md,
+            _control/ai-sdlc/definition-of-done.md and /tmp/primeqa-work-item.md.
+            Review PR #${{ inputs.pr_number }} in ${{ github.repository }} against the work item and architecture.
+            Inspect only; do not edit files. Check correctness, security, compatibility, error handling, tests,
+            maintainability, shared-boundary compliance and whether acceptance criteria are genuinely addressed.
+            Return `approve` only when no blocking/actionable implementation findings remain.
+      - name: Publish verdict and update central state
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          REVIEW_JSON: ${{ steps.codex.outputs.final-message }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          printf '%s' "$REVIEW_JSON" > /tmp/review.json
+          DECISION=$(jq -r '.decision' /tmp/review.json)
+          SUMMARY=$(jq -r '.summary' /tmp/review.json)
+          FINDINGS=$(jq -r '.findings[]? | "- " + .' /tmp/review.json)
+          printf '## Independent Codex review\n\n**Decision:** %s\n\n%s\n\n%s\n' "$DECISION" "$SUMMARY" "$FINDINGS" > /tmp/review-comment.md
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/review-comment.md
+          for label in state:review agent:reviewer ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo prime-QA-TCMS/primeqa-project --remove-label "$label" >/dev/null 2>&1 || true; done
+          if [ "$DECISION" = 'approve' ]; then
+            gh issue edit "$ISSUE_NUMBER" --repo prime-QA-TCMS/primeqa-project --remove-label ai:retry >/dev/null 2>&1 || true
+            gh issue edit "$ISSUE_NUMBER" --repo prime-QA-TCMS/primeqa-project --add-label 'state:qa,agent:qa' >/dev/null
+            gh issue comment "$ISSUE_NUMBER" --repo prime-QA-TCMS/primeqa-project --body "Independent review approved PR #$PR_NUMBER in $GITHUB_REPOSITORY. Work item advanced to QA."
+          else
+            gh issue edit "$ISSUE_NUMBER" --repo prime-QA-TCMS/primeqa-project --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null
+            gh issue comment "$ISSUE_NUMBER" --repo prime-QA-TCMS/primeqa-project --body "Independent review requested changes on PR #$PR_NUMBER in $GITHUB_REPOSITORY. Returned to implementation with ai:retry."
+          fi
