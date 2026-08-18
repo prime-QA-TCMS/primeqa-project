@@ -30,7 +30,10 @@ jobs:
             const {data: comments} = await github.rest.issues.listComments({owner: context.repo.owner, repo: context.repo.repo, issue_number: n, per_page: 100});
             const text = [...comments].reverse().map(c => c.body || '').join('\n');
             const m = text.match(/Implementation PR (?:created|ready for independent review):\s*(https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+))/);
-            if (!m) core.setFailed('No implementation PR found');
+            if (!m) {
+              core.setFailed('No implementation PR found');
+              return;
+            }
             const section = (heading) => {
               const body = issue.body || '';
               const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
