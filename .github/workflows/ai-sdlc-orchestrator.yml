@@ -77,8 +77,9 @@ jobs:
           ISSUE_URL: ${{ steps.item.outputs.issue_url }}
         run: |
           test -n "$GH_TOKEN" || { echo 'Missing PRIMEQA_AUTOMATION_TOKEN'; exit 1; }
+          LIVE_STATE=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.state')
           LABELS=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '[.labels[].name] | join(",")')
-          if [[ ",$LABELS," == *",ai:stop,"* ]]; then echo 'Hard stop detected before dispatch'; exit 0; fi
+          if [ "$LIVE_STATE" != 'open' ] || [[ ",$LABELS," == *",ai:stop,"* ]]; then echo "Stopped/stale before dispatch: state=$LIVE_STATE labels=$LABELS"; exit 0; fi
           gh api --method POST "/repos/$TARGET_REPO/dispatches" \
             -f event_type='primeqa-codex-task' \
             -f "client_payload[control_repo]=${{ github.repository }}" \
