@@ -45,9 +45,38 @@ jobs:
           CONTROL_REPO: ${{ inputs.control_repo }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: gh api "/repos/$CONTROL_REPO/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+
+      - name: Resume existing AI PR when present
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          CONTROL_REPO: ${{ inputs.control_repo }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          PR_URL=$(gh api "/repos/$CONTROL_REPO/issues/$ISSUE_NUMBER/comments?per_page=100" --jq '.[].body' \
+            | grep -F "https://github.com/${GITHUB_REPOSITORY}/pull/" \
+            | grep -Eo "https://github.com/${GITHUB_REPOSITORY}/pull/[0-9]+" | tail -1 || true)
+          if [ -z "$PR_URL" ]; then
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PR_NUMBER=${PR_URL##*/}
+          STATE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')
+          if [ "$STATE" != 'OPEN' ]; then
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BRANCH=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefName --jq '.headRefName')
+          git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH"
+          git checkout -B "$BRANCH" FETCH_HEAD
+          echo 'found=true' >> "$GITHUB_OUTPUT"
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
       - name: Preinstall Node dependencies when lockfile exists
         if: ${{ hashFiles('package-lock.json') != '' }}
         run: npm ci --no-audit --no-fund
+
       - name: Run Codex implementation agent
         id: codex
         uses: openai/codex-action@v1
@@ -61,29 +90,42 @@ jobs:
             _control/ai-sdlc/README.md, _control/ai-sdlc/agents.md,
             _control/ai-sdlc/definition-of-done.md and /tmp/primeqa-work-item.md.
             Implement ONLY this repository's required work. Do not invent unresolved requirements.
-            Respect service/shared-package boundaries. Add/update appropriate tests and documentation.
-            Run applicable checks with installed dependencies. Do not commit, push, merge, deploy,
-            or modify the _control checkout. Leave intended changes in the target working tree.
-      - name: Open implementation PR
+            Respect service/shared-package boundaries. If this is a retry, inspect existing branch changes and
+            address review/QA findings recorded on the linked work item/PR rather than starting over.
+            Add/update appropriate tests and documentation. Run applicable checks with installed dependencies.
+            Do not commit, push, merge, deploy, or modify the _control checkout.
+
+      - name: Commit and open/update implementation PR
         id: pr
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           ISSUE_URL: ${{ inputs.issue_url }}
           CODEX_SUMMARY: ${{ steps.codex.outputs.final-message }}
+          EXISTING: ${{ steps.existing.outputs.found }}
+          EXISTING_URL: ${{ steps.existing.outputs.url }}
+          EXISTING_BRANCH: ${{ steps.existing.outputs.branch }}
         run: |
-          if git diff --quiet && test -z "$(git status --porcelain)"; then echo 'created=false' >> "$GITHUB_OUTPUT"; exit 0; fi
-          BRANCH="ai/issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}"
+          if git diff --quiet && test -z "$(git status --porcelain)"; then
+            echo 'No target changes produced.'
+            echo 'created=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EXISTING" = 'true' ]; then BRANCH="$EXISTING_BRANCH"; else BRANCH="ai/issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}"; git checkout -b "$BRANCH"; fi
           git config user.name 'primeqa-codex[bot]'
           git config user.email 'primeqa-codex[bot]@users.noreply.github.com'
-          git checkout -b "$BRANCH"
           git add -A
           git commit -m "ai-sdlc: implement issue ${ISSUE_NUMBER}"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH"
-          printf 'Central work item: %s\n\nImplemented by Codex Developer agent. Independent review and QA required.\n\nCodex evidence summary:\n%s\n' "$ISSUE_URL" "$CODEX_SUMMARY" > /tmp/pr-body.md
-          PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --draft --title "[AI-SDLC] Issue ${ISSUE_NUMBER}" --body-file /tmp/pr-body.md)
+          if [ "$EXISTING" = 'true' ]; then
+            PR_URL="$EXISTING_URL"
+          else
+            printf 'Central work item: %s\n\nImplemented by Codex Developer agent. Independent review and QA required.\n\nCodex evidence summary:\n%s\n' "$ISSUE_URL" "$CODEX_SUMMARY" > /tmp/pr-body.md
+            PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --draft --title "[AI-SDLC] Issue ${ISSUE_NUMBER}" --body-file /tmp/pr-body.md)
+          fi
           echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo 'created=true' >> "$GITHUB_OUTPUT"
+
       - name: Advance central item to review
         if: steps.pr.outputs.created == 'true'
         env:
@@ -93,7 +135,7 @@ jobs:
           PR_URL: ${{ steps.pr.outputs.url }}
           SHARED: ${{ inputs.shared_package }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --body "Implementation PR created: $PR_URL\n\nState advanced to independent review."
-          for label in state:implementation agent:developer ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --remove-label "$label" >/dev/null 2>&1 || true; done
+          gh issue comment "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --body "Implementation PR ready for independent review: $PR_URL"
+          for label in state:implementation agent:developer ai:running ai:ready ai:retry; do gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --remove-label "$label" >/dev/null 2>&1 || true; done
           gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --add-label 'state:review,agent:reviewer' >/dev/null
           if [ "$SHARED" = 'true' ]; then gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --add-label 'shared-package' >/dev/null; fi
