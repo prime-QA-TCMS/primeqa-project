@@ -1,8 +1,8 @@
 # AI-SDLC Smoke Test Record
 
-Date: 2026-08-18  
-Requirements: `TR-GOV-001`, `TR-GOV-002`  
-Work item: AI-SDLC activation smoke-test repository task
+- Date: 2026-08-18
+- Requirements: `TR-GOV-001`, `TR-GOV-002`
+- Work item: issue `#2`, AI-SDLC activation smoke-test repository task
 
 This documentation-only change records execution of the first controlled Prime QA AI-SDLC smoke test through the automated workflow described in `ai-sdlc/activation.md`.
 
