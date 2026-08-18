@@ -1,0 +1,103 @@
+name: AI-SDLC QA Gate
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  qa:
+    if: github.event.label.name == 'state:qa'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout control plane
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Resolve implementation PR
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          script: |
+            const n = context.payload.issue.number;
+            const {data: comments} = await github.rest.issues.listComments({owner: context.repo.owner, repo: context.repo.repo, issue_number: n, per_page: 100});
+            const text = [...comments].reverse().map(c => c.body || '').join('\n');
+            const m = text.match(/Implementation PR created:\s*(https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+))/);
+            if (!m) core.setFailed('No implementation PR found in work-item comments');
+            core.setOutput('pr_url', m[1]);
+            core.setOutput('repo', m[2]);
+            core.setOutput('pr_number', m[3]);
+            core.setOutput('issue_number', String(n));
+
+      - name: Fetch work item and PR/CI evidence
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.resolve.outputs.issue_number }}
+          TARGET_REPO: ${{ steps.resolve.outputs.repo }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+        run: |
+          gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+          gh api "/repos/$TARGET_REPO/pulls/$PR_NUMBER" > /tmp/pr.json
+          SHA=$(jq -r '.head.sha' /tmp/pr.json)
+          gh api "/repos/$TARGET_REPO/commits/$SHA/check-runs" > /tmp/checks.json || echo '{"check_runs":[]}' > /tmp/checks.json
+          jq '{total_count, checks: [.check_runs[] | {name,status,conclusion,html_url}]}' /tmp/checks.json > /tmp/ci-summary.json
+
+      - name: Checkout PR merge result
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.resolve.outputs.repo }}
+          ref: refs/pull/${{ steps.resolve.outputs.pr_number }}/merge
+          token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          path: _target
+          persist-credentials: false
+
+      - name: Independent QA assessment
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ':read-only'
+          safety-strategy: drop-sudo
+          output-schema: |
+            {"type":"object","properties":{"decision":{"type":"string","enum":["pass","changes_required","human_required"]},"summary":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},"gaps":{"type":"array","items":{"type":"string"}}},"required":["decision","summary","evidence","gaps"],"additionalProperties":false}
+          prompt: |
+            You are the independent QA Analyst for Prime QA. Do not modify files.
+            Read AGENTS.md, requirements/technical-requirements.md, ai-sdlc/definition-of-done.md,
+            /tmp/primeqa-work-item.md and /tmp/ci-summary.json. Inspect the implementation under _target.
+            Determine whether acceptance criteria have adequate automated/unit/API/UI/integration coverage for the change,
+            whether existing checks provide credible evidence, and whether regression/error/security-relevant behavior is tested.
+            Do not pass merely because CI is green. Return changes_required for implementable test/quality gaps and
+            human_required only for a genuine decision/environment dependency that cannot be resolved from evidence.
+
+      - name: Update work-item state
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.resolve.outputs.issue_number }}
+          QA_JSON: ${{ steps.codex.outputs.final-message }}
+          PR_URL: ${{ steps.resolve.outputs.pr_url }}
+        run: |
+          printf '%s' "$QA_JSON" > /tmp/qa.json
+          DECISION=$(jq -r '.decision' /tmp/qa.json)
+          SUMMARY=$(jq -r '.summary' /tmp/qa.json)
+          EVIDENCE=$(jq -r '.evidence[]? | "- " + .' /tmp/qa.json)
+          GAPS=$(jq -r '.gaps[]? | "- " + .' /tmp/qa.json)
+          printf '## AI-SDLC QA gate\n\n**Decision:** %s\n\n%s\n\n### Evidence\n%s\n\n### Gaps\n%s\n\nPR: %s\n' "$DECISION" "$SUMMARY" "$EVIDENCE" "$GAPS" "$PR_URL" > /tmp/comment.md
+          gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body-file /tmp/comment.md
+          for label in state:qa agent:qa ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label "$label" >/dev/null 2>&1 || true; done
+          case "$DECISION" in
+            pass)
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label ai:retry >/dev/null 2>&1 || true
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:verification,agent:auditor' >/dev/null
+              ;;
+            changes_required)
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null
+              ;;
+            human_required)
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
+              ;;
+          esac
