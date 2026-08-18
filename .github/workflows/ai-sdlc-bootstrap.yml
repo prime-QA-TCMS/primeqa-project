@@ -1,0 +1,43 @@
+name: AI-SDLC Bootstrap
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ai-sdlc-bootstrap.yml'
+      - 'ai-sdlc/github-project-model.md'
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure AI-SDLC labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = [
+              ['state:intake','D4C5F9'],['state:analysis','C5DEF5'],['state:architecture','BFDADC'],
+              ['state:ready','0E8A16'],['state:implementation','FBCA04'],['state:review','D93F0B'],
+              ['state:qa','5319E7'],['state:verification','006B75'],['state:human-decision','B60205'],
+              ['state:blocked','B60205'],['state:done','0E8A16'],
+              ['agent:orchestrator','1D76DB'],['agent:business','7057FF'],['agent:product','7057FF'],
+              ['agent:technical','0052CC'],['agent:architect','0052CC'],['agent:security','B60205'],
+              ['agent:developer','FBCA04'],['agent:reviewer','D93F0B'],['agent:qa','5319E7'],
+              ['agent:automation','5319E7'],['agent:performance','5319E7'],['agent:auditor','006B75'],
+              ['ai:managed','6F42C1'],['ai:ready','0E8A16'],['ai:running','FBCA04'],
+              ['ai:retry','D93F0B'],['ai:stop','B60205'],['human:required','B60205'],
+              ['cross-repo','1D76DB'],['shared-package','B60205']
+            ];
+            for (const [name,color] of labels) {
+              try {
+                await github.rest.issues.getLabel({owner: context.repo.owner, repo: context.repo.repo, name});
+              } catch (e) {
+                if (e.status !== 404) throw e;
+                await github.rest.issues.createLabel({owner: context.repo.owner, repo: context.repo.repo, name, color});
+              }
+            }
