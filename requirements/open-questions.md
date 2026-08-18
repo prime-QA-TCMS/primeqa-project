@@ -1,242 +1,201 @@
-# Prime QA TCMS — Open Technical Questions
+# Prime QA TCMS — Remaining Open Technical Questions
 
-Status: **Owner/evidence decisions required**  
+Status: **Major owner questions resolved; targeted analysis remains**  
 Last updated: **2026-08-18**
 
-This file records matters that are not sufficiently clear to implement safely. Agents must not invent answers.
+The original 25-question technical clarification set has been consolidated into `requirements/technical-requirements.md`. This file now contains only matters that still require evidence, detailed design, or owner confirmation. Agents must not invent answers.
+
+## Owner decisions now resolved
+
+The following original areas have owner-approved direction and are no longer open at the product level:
+
+- OQ-001 role model / principal product access model
+- OQ-002 service boundary direction
+- OQ-003 API style, versioning, standardization, resilience and security direction
+- OQ-004 authentication-method configuration direction
+- OQ-005 tenant purpose and optional-instance model
+- OQ-006 hierarchical retention policy model
+- OQ-007 external archive model
+- OQ-008 self-hosted user-limit policy
+- OQ-009 deployment/configuration experience direction
+- OQ-010 independently deployable services + Deploy All
+- OQ-011 mandatory `primeqa-common` scope
+- OQ-012 `fog-ui` ownership/governance direction
+- OQ-013 UI modernization decision method
+- OQ-014 reporting direction
+- OQ-015 configuration/rule versioning model
+- OQ-017 comprehensive audit direction
+- OQ-018 test-case versioning direction
+- OQ-019 test-design, Plan, Run and assignment model
+- OQ-020 external automation/result-ingestion model
+- OQ-021 initial integration scope
+- OQ-022 principal NFR targets
+- OQ-023 import/export permissions and formats
+- OQ-024 attachment format/storage direction
+- OQ-025 deletion model
+
+## Remaining questions / analysis assignments
 
-## Priority open questions
+### RQ-001 — Final release capability boundary
+The role model and many technical capabilities are defined, but the authoritative **first complete release feature catalogue**, explicitly out-of-scope product features, and programme-level acceptance criteria still need consolidation from current implementation + product analysis.
+
+**Required:** Business/Product analysis followed by owner confirmation where conflicts exist.
+
+### RQ-002 — Detailed role/permission matrix
+Default roles are defined, but granular permissions still require formalization, including:
 
-### OQ-001 — Final target product scope
+- whether Lead QA manages project membership/roles;
+- exact Tester result-edit scope;
+- exact Developer visibility beyond results;
+- exact Stakeholder report/dashboard visibility;
+- whether users may belong to multiple tenants;
+- whether a distinct tenant-admin role/permission set is required.
 
-We have an existing implementation and architectural direction, but the authoritative final capability list and acceptance boundaries are not yet consolidated.
+**Required:** Business Analyst + End-user/Product Analyst recommendation, constrained by the approved five default roles.
 
-Need to establish:
+### RQ-003 — API protocol details
+REST + optional globally configured GraphQL is approved. Detailed design remains for:
 
-- required end-user roles/personas
-- required workflows per role
-- required TCMS capabilities for first complete release
-- explicitly out-of-scope features
-- acceptance criteria for programme completion
+- concrete URL version convention;
+- deprecation/backward-compatibility windows;
+- canonical response/error schemas;
+- pagination/filter/sort syntax;
+- exact idempotency-key semantics;
+- GraphQL exposure/versioning strategy.
 
-### OQ-002 — Service boundary completeness
+**Required:** Architect + Technical Analyst; implement shared standards through `primeqa-common`.
 
-Current services are user, project, testcase, results and configuration. It remains unclear whether the intended target needs additional bounded services (for example reporting, notifications, integrations, audit, attachments, imports/exports) or whether those responsibilities belong inside existing services.
+### RQ-004 — Authentication/security lifecycle details
+Supported authentication families are approved. Detailed design remains for:
 
-Decision should follow current-state analysis rather than creating services pre-emptively.
+- local credential identifier(s) and password policy;
+- token/session lifetime and refresh/revocation;
+- external identity linking;
+- behaviour when an IdP is disabled;
+- service-to-service authentication;
+- MFA behaviour by provider;
+- secure recovery/bootstrap flows.
 
-### OQ-003 — API style and versioning policy
+**Required:** Security/Architecture analysis.
 
-HTTP/REST is clearly present. Prior skills/context also referenced GraphQL generally, but it is not clear that GraphQL is an approved TCMS requirement.
+### RQ-005 — Tenant detailed semantics
+Tenant purpose and optional enablement are approved. Still determine:
 
-Need explicit decisions on:
+- multi-tenant membership for one user;
+- tenant-admin capability model;
+- exact tenant data partition/isolation implementation;
+- tenant deletion/export workflow;
+- which configuration categories are tenant-overridable.
 
-- REST-only vs any GraphQL requirement
-- API versioning convention
-- backwards-compatibility/deprecation policy
-- shared response envelope/error schema
-- pagination/filter/sort standards
-- idempotency expectations for write operations
+**Required:** Business + Architecture analysis.
 
-### OQ-004 — Authentication and authorization model
+### RQ-006 — Retention defaults and data-class matrix
+The configurable hierarchy and three policy classes are approved. Exact default values and category-specific rules remain to be defined for results, diagnostics, audit, reports/scorecards, configuration history, tenant data, attachments and other high-volume/transient data.
 
-The user service uses JWT-related tooling, but the target authorization model is not yet fully documented.
+**Required:** Business/Compliance/Technical analysis and owner approval of defaults.
 
-Need to define:
+### RQ-007 — Archive provider contract and restoration
+External configured archive storage is approved. Still define:
 
-- authentication flow(s)
-- token/session lifecycle
-- refresh/revocation behaviour
-- role model
-- project/tenant membership model
-- permission granularity
-- administrator capabilities
-- service-to-service authentication, if required
+- supported provider interface/adapters;
+- encryption/integrity requirements;
+- archive package/data representation using standard formats;
+- restoration workflow;
+- verification before live-data removal;
+- provider outage/retry behaviour.
 
-### OQ-005 — Tenant model
+**Required:** Architect + Technical Analyst.
 
-Tenant-aware data is a requirement, but tenancy semantics are unclear.
+### RQ-008 — Deployment implementation details
+Deploy-to-server, database wizard, independent services and Deploy All are approved. Still define:
 
-Need to define:
+- concrete GitHub deployment mechanism;
+- container/orchestrator baseline;
+- release/version strategy;
+- DB migrations/upgrades/rollback;
+- minimum infrastructure;
+- secrets management;
+- Admin-configurable backup/recovery mechanisms.
 
-- what constitutes a tenant
-- whether a user can belong to multiple tenants
-- tenant administrator model
-- data partition/isolation strategy
-- tenant deletion/export obligations
-- tenant-specific configuration scope
+**Required:** Architect/DevOps analysis.
 
-### OQ-006 — Data retention matrix
+### RQ-009 — `fog-ui` catalogue/tooling implementation
+Component ownership, documentation, accessibility, automation-readiness and unit testing are approved. Select the implementation approach for the catalogue/how-to experience (e.g. Storybook or equivalent), visual regression strategy, semantic-versioning policy and measurable accessibility gates.
 
-The standard direction is approximately 3 years active plus 10 years archived, with shorter retention for some failure/transient data.
+**Required:** Frontend Architect + QA analysis.
 
-Exact values and lifecycle rules remain unclear for:
+### RQ-010 — Configuration history count wording
+Owner direction was “retain up to 3 versions” after discussion of historical versions. The baseline currently interprets this as **current + up to 3 previous versions**. Confirm during implementation before schema finalization.
 
-- execution results
-- failed execution diagnostic payloads/logs
-- audit/history records
-- scorecard data
-- rule/configuration history
-- tenant data after tenant termination/deletion
-- mappings/reference data
-- attachments/export artefacts, if present
+### RQ-011 — ISTQB reporting catalogue
+ISTQB-aligned default reporting plus custom reports is approved. Determine the concrete default metrics, calculations, report templates, data sources and trend/history views appropriate to the product.
 
-Need a formal matrix containing data class, active period, archive period, deletion trigger, legal/business rationale, restoration requirements, and reference-integrity behaviour.
+**Required:** Business Analyst + QA/Test Management Analyst.
 
-### OQ-007 — Archive implementation
+### RQ-012 — Mapping/reference data investigation
+Do not assume this is a requirement. Investigate using four lenses:
 
-It is unclear whether archive means:
+- Business Analyst
+- Architect
+- Technical Analyst
+- End-user/Product Analyst
 
-- same database with archived state/index strategy
-- separate collections
-- separate database/storage tier
-- exported immutable files/object storage
-- another archival mechanism
+Determine whether a real mapping/reference capability exists or is needed, what problem it solves, and how historical integrity should work. Return evidence + recommendation + unresolved questions.
 
-This affects query behaviour, cost, restore capability and deletion controls.
+### RQ-013 — Test-case version retention count
+Test-case versioning, comparison, revert and exact-version execution references are approved. The number/lifecycle of historical test-case versions is not yet specified.
 
-### OQ-008 — Five-user self-hosted free tier enforcement
+**Required:** Business/Product recommendation considering storage and audit requirements.
 
-The product direction states self-hosted use is free up to 5 users, but technical enforcement is not specified.
+### RQ-014 — Detailed result/status model
+Plan/Run structures are approved. Still define:
 
-Need to decide whether this is:
+- canonical result statuses (including Review/Warning semantics);
+- step-level versus case-level result representation;
+- rerun/retest semantics;
+- execution completion/locking rules;
+- comments/evidence behaviour;
+- exact environment/build/configuration metadata model.
 
-- licence-enforced in software
-- configuration-controlled
-- honour/commercial-policy only
-- enforced only for official distributions/support
+**Required:** Business Analyst + QA/Test Management Analyst.
 
-Also clarify what counts as a user: active users, invited users, administrators, service accounts, disabled users, etc.
+### RQ-015 — Automation ingestion contract
+Admin-controlled automation creation, field mapping, non-unique Automation IDs and propagation rules are approved. Still define the wire/API contract, authentication, execution correlation, partial submissions, retry semantics and exact warning/failure policy options.
 
-### OQ-009 — Packaging/distribution model
+**Required:** Architect + QA Automation Analyst.
 
-Self-hosting is required, but target distribution is unclear.
+### RQ-016 — Integration adapter specifications
+Required providers/families are approved. Define supported operations and authentication per provider, webhook model, sync direction, conflict/retry behaviour and minimum first-release provider coverage.
 
-Need to define:
+**Required:** Integration/Technical analysis.
 
-- Docker Compose as supported baseline or merely development tooling
-- Kubernetes requirement, if any
-- packaged release/version strategy
-- database provisioning/migrations
-- upgrade/rollback process
-- minimum supported infrastructure
-- backup/restore expectations
+### RQ-017 — Measurable accessibility/security standards
+“Comprehensive accessibility” and strongest reasonably achievable security are approved directions. Convert these into testable standards and release gates (e.g. WCAG target, OWASP/API controls, dependency scanning, SAST/DAST expectations, secrets controls, threat modelling).
 
-### OQ-010 — Deployment topologies
+**Required:** Accessibility + Security + QA analysis.
 
-Need to decide whether all services must always deploy independently or whether an all-in-one self-hosted topology is supported/expected for small installations.
+### RQ-018 — Performance/load acceptance profile
+Scale and response targets are approved. Define representative datasets, normal vs large-return definitions, percentile targets, concurrency ramps and test environments so the NFRs can be objectively verified.
 
-### OQ-011 — Shared API package scope
+**Required:** Performance QA + Architect.
 
-`primeqa-common` is confirmed as the common API standardization package, but the exact mandatory/common surface must be documented after inspection.
+### RQ-019 — Attachment security/storage implementation
+Any file format and Admin-selected DB/cloud/OneDrive/SharePoint storage are approved. Define size limits, malware scanning, content-disposition/preview rules, provider adapters, encryption and migration behaviour when storage backend changes.
 
-Need to determine which concerns are canonical there versus service-owned, including:
+**Required:** Security + Architect + Technical Analyst.
 
-- error model
-- API response model
-- validation
-- JWT/auth utilities
-- middleware
-- logging/correlation IDs
-- request context
-- configuration loading
-- health/readiness endpoints
-- pagination
-- shared DTO/types
+### RQ-020 — Hard-delete authorization and reference rules
+Soft-delete default, optional hard delete and Admin-configured automatic purge are approved. Define which roles may hard-delete each domain entity and when hard delete must be blocked/anonymized/snapshotted to preserve historical integrity.
 
-### OQ-012 — `fog-ui` governance
-
-`fog-ui` is confirmed as the reusable/custom UI component package, but its component admission/versioning rules need definition.
-
-Need decisions on:
-
-- what qualifies as reusable enough for `fog-ui`
-- semantic versioning expectations
-- design tokens/theme ownership
-- accessibility baseline
-- visual regression/component documentation approach
-- whether Storybook or equivalent is required
-
-### OQ-013 — UI architecture modernization
-
-The current UI is React/TypeScript and still uses `react-scripts` while `fog-ui` uses Vite. It is unclear whether migrating the main UI build tooling is a requirement or merely technical debt.
-
-Do not migrate solely for preference.
-
-### OQ-014 — Reporting/scorecard requirements
-
-Prior discussions referenced scorecard/quality measurement data, but the exact product capability, calculations, sources, user workflows and retention requirements are unclear.
-
-### OQ-015 — Rule/configuration model
-
-Rule/configuration data has been identified as a distinct data class, but the system of record, versioning, audit history, evaluation behaviour and rollback requirements are unclear.
-
-### OQ-016 — Mapping/reference data
-
-Mapping data was called out separately in retention discussions. Need to define what entities are mapped, whether mappings are tenant-specific, and how historical results remain interpretable after mappings change.
-
-### OQ-017 — Audit trail
-
-It is unclear which user/admin actions require immutable or durable audit history. This is especially important for permissions, test changes, execution/results changes and configuration/rule changes.
-
-### OQ-018 — Test case versioning
-
-Need to establish whether test cases are mutable in place or versioned, and how historical executions reference the exact test definition used at execution time.
-
-### OQ-019 — Test execution model
-
-Need explicit definitions for:
-
-- test runs/cycles/plans/suites (which entities are required)
-- assignment/ownership
-- execution status model
-- step-level vs case-level results
-- evidence/attachments
-- reruns/retests
-- environment/build/version metadata
-- automated vs manual result ingestion
-
-### OQ-020 — External automation/result ingestion
-
-The intended mechanism for automated frameworks to submit/associate execution results with TCMS entities needs to be defined, including authentication, idempotency, mapping, partial results and retry behaviour.
-
-### OQ-021 — Integration requirements
-
-No authoritative requirement is currently captured for Jira, GitHub, CI systems, webhooks, email/chat notifications, identity providers or other external integrations.
-
-### OQ-022 — Non-functional targets
-
-Need measurable targets for:
-
-- expected tenant/user/test-case/execution volumes
-- API response/performance expectations
-- concurrency
-- availability
-- recovery objectives
-- browser support
-- accessibility level
-- security baseline
-- observability
-
-### OQ-023 — Data export/import and portability
-
-Self-hosted customers may require import/export or migration capabilities, but exact requirements are unclear.
-
-### OQ-024 — Attachments and object storage
-
-It is unclear whether test cases/results support screenshots, files, videos or other evidence, and if so where they are stored and retained.
-
-### OQ-025 — Deletion semantics
-
-Need domain-specific rules for soft delete, hard delete, restore, cascade prevention, anonymization, and historical references.
+**Required:** Business + Data Architecture analysis.
 
 ## Resolution rule
 
-An open question may be closed only by one of:
+A remaining question may be closed by:
 
 1. explicit project-owner decision;
-2. authoritative existing requirement/product documentation;
-3. clear current-system evidence where the intent is to preserve existing behaviour;
-4. an approved ADR when the question is genuinely architectural rather than product-owned.
+2. authoritative product/compliance requirement;
+3. clear current-system evidence where preserving behaviour is intended;
+4. approved ADR for architectural decisions.
 
-When resolved, update the technical requirements and/or architecture documents and record the evidence/decision source.
+When resolved, update the authoritative technical baseline and record the evidence/decision source. Do not silently resolve uncertainties in implementation code.
