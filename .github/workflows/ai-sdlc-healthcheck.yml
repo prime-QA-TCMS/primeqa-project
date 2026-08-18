@@ -1,0 +1,45 @@
+name: AI-SDLC Healthcheck
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required secrets are present
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PRIMEQA_AUTOMATION_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+        run: |
+          test -n "$OPENAI_API_KEY" || { echo 'OPENAI_API_KEY is missing'; exit 1; }
+          test -n "$PRIMEQA_AUTOMATION_TOKEN" || { echo 'PRIMEQA_AUTOMATION_TOKEN is missing'; exit 1; }
+          echo 'Required secrets are present.'
+
+      - name: Verify cross-repository token access
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+        run: |
+          set -e
+          repos=(
+            primeQA-UI primeqa-common fog-ui user-service project-service testcase-service
+            results-service configuration-service primeqa-project primeqa-qa-ui-engine
+            primeqa-qa-api-engine primeqa-qa-test-automation
+          )
+          for repo in "${repos[@]}"; do
+            echo "Checking prime-QA-TCMS/$repo"
+            gh api "/repos/prime-QA-TCMS/$repo" --jq '.full_name + " access OK"'
+          done
+
+      - name: Verify Codex action credential
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ':read-only'
+          safety-strategy: drop-sudo
+          prompt: |
+            This is a Prime QA AI-SDLC activation healthcheck. Do not modify anything.
+            Respond only with: HEALTHY
