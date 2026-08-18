@@ -1,0 +1,74 @@
+name: AI-SDLC Orchestrator
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Central AI-SDLC issue number
+        required: true
+        type: string
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.label.name == 'ai:ready')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve and validate work item
+        id: item
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.eventName === 'workflow_dispatch'
+              ? Number('${{ inputs.issue_number }}')
+              : context.payload.issue.number;
+            const {data: issue} = await github.rest.issues.get({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber});
+            const labels = issue.labels.map(x => typeof x === 'string' ? x : x.name);
+            if (!labels.includes('ai:managed')) core.setFailed('Issue is not ai:managed');
+            if (labels.includes('ai:stop')) core.setFailed('Automation stopped for this item');
+            if (labels.includes('human:required') || labels.includes('state:human-decision')) core.setFailed('Human decision required before dispatch');
+            if (labels.includes('ai:running')) core.setFailed('Item already has an active automation run');
+
+            const section = (heading) => {
+              const body = issue.body || '';
+              const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const re = new RegExp(`### ${escaped}\\s*\\n+([\\s\\S]*?)(?=\\n### |$)`,'i');
+              const match = body.match(re);
+              return match ? match[1].trim() : '';
+            };
+            const targets = section('Target repository/repositories')
+              .split(',').map(x => x.trim()).filter(Boolean);
+            if (targets.length !== 1) core.setFailed('Initial autonomous implementation requires exactly one target repo per Repo Task. Decompose cross-repo work first.');
+            const target = targets[0];
+            if (!/^prime-QA-TCMS\/[A-Za-z0-9_.-]+$/.test(target)) core.setFailed(`Invalid target repo: ${target}`);
+
+            core.setOutput('issue_number', String(issueNumber));
+            core.setOutput('target_repo', target);
+            core.setOutput('issue_url', issue.html_url);
+
+            const stateLabels = labels.filter(x => x?.startsWith('state:'));
+            for (const name of stateLabels) {
+              await github.rest.issues.removeLabel({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name}).catch(()=>{});
+            }
+            await github.rest.issues.addLabels({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, labels:['state:implementation','agent:developer','ai:running']});
+
+      - name: Dispatch target repository worker
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          TARGET_REPO: ${{ steps.item.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ steps.item.outputs.issue_number }}
+          ISSUE_URL: ${{ steps.item.outputs.issue_url }}
+        run: |
+          test -n "$GH_TOKEN" || { echo 'Missing PRIMEQA_AUTOMATION_TOKEN'; exit 1; }
+          gh api --method POST "/repos/$TARGET_REPO/dispatches" \
+            -f event_type='primeqa-codex-task' \
+            -f "client_payload[control_repo]=${{ github.repository }}" \
+            -f "client_payload[issue_number]=$ISSUE_NUMBER" \
+            -f "client_payload[issue_url]=$ISSUE_URL"
