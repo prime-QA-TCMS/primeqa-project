@@ -1,0 +1,99 @@
+name: Reusable Prime QA Codex Worker
+
+on:
+  workflow_call:
+    inputs:
+      control_repo:
+        required: true
+        type: string
+      issue_number:
+        required: true
+        type: string
+      issue_url:
+        required: true
+        type: string
+      shared_package:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+      PRIMEQA_AUTOMATION_TOKEN:
+        required: true
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout control plane
+        uses: actions/checkout@v5
+        with:
+          repository: prime-QA-TCMS/primeqa-project
+          token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          path: _control
+          persist-credentials: false
+      - run: echo '_control/' >> .git/info/exclude
+      - name: Fetch central work item
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          CONTROL_REPO: ${{ inputs.control_repo }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: gh api "/repos/$CONTROL_REPO/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+      - name: Preinstall Node dependencies when lockfile exists
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        run: npm ci --no-audit --no-fund
+      - name: Run Codex implementation agent
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ':workspace'
+          safety-strategy: drop-sudo
+          prompt: |
+            You are the Developer agent in the Prime QA automated SDLC.
+            Read _control/AGENTS.md, _control/requirements/technical-requirements.md,
+            _control/ai-sdlc/README.md, _control/ai-sdlc/agents.md,
+            _control/ai-sdlc/definition-of-done.md and /tmp/primeqa-work-item.md.
+            Implement ONLY this repository's required work. Do not invent unresolved requirements.
+            Respect service/shared-package boundaries. Add/update appropriate tests and documentation.
+            Run applicable checks with installed dependencies. Do not commit, push, merge, deploy,
+            or modify the _control checkout. Leave intended changes in the target working tree.
+      - name: Open implementation PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_URL: ${{ inputs.issue_url }}
+          CODEX_SUMMARY: ${{ steps.codex.outputs.final-message }}
+        run: |
+          if git diff --quiet && test -z "$(git status --porcelain)"; then echo 'created=false' >> "$GITHUB_OUTPUT"; exit 0; fi
+          BRANCH="ai/issue-${ISSUE_NUMBER}-${GITHUB_RUN_ID}"
+          git config user.name 'primeqa-codex[bot]'
+          git config user.email 'primeqa-codex[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "ai-sdlc: implement issue ${ISSUE_NUMBER}"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH"
+          printf 'Central work item: %s\n\nImplemented by Codex Developer agent. Independent review and QA required.\n\nCodex evidence summary:\n%s\n' "$ISSUE_URL" "$CODEX_SUMMARY" > /tmp/pr-body.md
+          PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --draft --title "[AI-SDLC] Issue ${ISSUE_NUMBER}" --body-file /tmp/pr-body.md)
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo 'created=true' >> "$GITHUB_OUTPUT"
+      - name: Advance central item to review
+        if: steps.pr.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          CONTROL_REPO: ${{ inputs.control_repo }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          SHARED: ${{ inputs.shared_package }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --body "Implementation PR created: $PR_URL\n\nState advanced to independent review."
+          for label in state:implementation agent:developer ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --remove-label "$label" >/dev/null 2>&1 || true; done
+          gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --add-label 'state:review,agent:reviewer' >/dev/null
+          if [ "$SHARED" = 'true' ]; then gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --add-label 'shared-package' >/dev/null; fi
