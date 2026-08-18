@@ -1,0 +1,91 @@
+name: AI-SDLC Work Item
+description: Create a structured work item for the Prime QA automated SDLC
+title: "[AI-SDLC] "
+labels:
+  - ai:managed
+  - state:intake
+body:
+  - type: dropdown
+    id: work_type
+    attributes:
+      label: Work type
+      options:
+        - Requirement
+        - Capability
+        - Story
+        - Repo Task
+        - Defect
+        - Analysis
+        - Architecture
+        - QA
+        - Security
+        - Performance
+    validations:
+      required: true
+  - type: input
+    id: requirement_ids
+    attributes:
+      label: Requirement IDs
+      description: Comma-separated IDs from the project control plane, e.g. TR-API-003, TR-AUTO-004
+    validations:
+      required: true
+  - type: input
+    id: target_repos
+    attributes:
+      label: Target repository/repositories
+      description: Use owner/repo; comma separate when cross-repository
+      placeholder: prime-QA-TCMS/results-service
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Required outcome
+      description: Describe observable outcome, not implementation preference.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: One objectively verifiable criterion per line.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Source evidence / context
+      description: Requirements, ADRs, code paths, defects, screenshots, logs or other evidence.
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Related issue IDs, prerequisite PRs, services or shared packages.
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      options:
+        - Low
+        - Medium
+        - High
+        - Critical
+    validations:
+      required: true
+  - type: checkboxes
+    id: gates
+    attributes:
+      label: Known human gates
+      options:
+        - label: Product decision required
+        - label: Architecture approval required
+        - label: Security approval required
+        - label: Destructive action approval required
+        - label: Release/deployment approval required
+  - type: checkboxes
+    id: ready
+    attributes:
+      label: Intake confirmation
+      options:
+        - label: I have not knowingly converted an unresolved product question into an implementation assumption.
+          required: true
