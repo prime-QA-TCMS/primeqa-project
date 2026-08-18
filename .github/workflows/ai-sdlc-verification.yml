@@ -1,0 +1,130 @@
+name: AI-SDLC Objective Verification
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.label.name == 'state:verification'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout control plane
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Resolve work item and implementation PR
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          script: |
+            const n = context.payload.issue.number;
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(x => typeof x === 'string' ? x : x.name);
+            const {data: comments} = await github.rest.issues.listComments({owner: context.repo.owner, repo: context.repo.repo, issue_number: n, per_page: 100});
+            const text = [...comments].reverse().map(c => c.body || '').join('\n');
+            const m = text.match(/Implementation PR (?:created|ready for independent review):\s*(https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+))/);
+            if (!m) core.setFailed('No implementation PR found');
+            const section = (heading) => {
+              const body = issue.body || '';
+              const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const re = new RegExp(`### ${escaped}\\s*\\n+([\\s\\S]*?)(?=\\n### |$)`,'i');
+              const match = body.match(re);
+              return match ? match[1].trim() : '';
+            };
+            core.setOutput('issue_number', String(n));
+            core.setOutput('pr_url', m[1]);
+            core.setOutput('repo', m[2]);
+            core.setOutput('pr_number', m[3]);
+            core.setOutput('risk', section('Risk').toLowerCase());
+            core.setOutput('shared', labels.includes('shared-package') ? 'true' : 'false');
+
+      - name: Fetch central work item
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.resolve.outputs.issue_number }}
+        run: gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+
+      - name: Checkout implementation PR
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.resolve.outputs.repo }}
+          ref: refs/pull/${{ steps.resolve.outputs.pr_number }}/merge
+          token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          path: _target
+          persist-credentials: false
+
+      - name: Objective Auditor
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ':read-only'
+          safety-strategy: drop-sudo
+          output-schema: |
+            {"type":"object","properties":{"decision":{"type":"string","enum":["pass","fail","human_required"]},"summary":{"type":"string"},"acceptance_evidence":{"type":"array","items":{"type":"string"}},"missing_evidence":{"type":"array","items":{"type":"string"}}},"required":["decision","summary","acceptance_evidence","missing_evidence"],"additionalProperties":false}
+          prompt: |
+            You are the Objective Auditor, the final independent verification context in the Prime QA AI-SDLC.
+            Do not edit code. Read AGENTS.md, requirements/technical-requirements.md,
+            ai-sdlc/definition-of-done.md, ai-sdlc/permissions-and-gates.md and /tmp/primeqa-work-item.md.
+            Inspect _target and the work-item evidence. Verify the observable acceptance criteria and Definition of Done,
+            not merely whether a PR exists. Return pass only when the requirement has sufficient implementation and
+            validation evidence. Return fail for remediable implementation/quality gaps, human_required for unresolved
+            product/security/destructive decisions or evidence that cannot be obtained autonomously.
+
+      - name: Complete, retry, or escalate
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.resolve.outputs.issue_number }}
+          TARGET_REPO: ${{ steps.resolve.outputs.repo }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          PR_URL: ${{ steps.resolve.outputs.pr_url }}
+          RISK: ${{ steps.resolve.outputs.risk }}
+          SHARED: ${{ steps.resolve.outputs.shared }}
+          VERDICT_JSON: ${{ steps.codex.outputs.final-message }}
+        run: |
+          printf '%s' "$VERDICT_JSON" > /tmp/verdict.json
+          DECISION=$(jq -r '.decision' /tmp/verdict.json)
+          SUMMARY=$(jq -r '.summary' /tmp/verdict.json)
+          EVIDENCE=$(jq -r '.acceptance_evidence[]? | "- " + .' /tmp/verdict.json)
+          MISSING=$(jq -r '.missing_evidence[]? | "- " + .' /tmp/verdict.json)
+          printf '## Objective verification\n\n**Decision:** %s\n\n%s\n\n### Acceptance evidence\n%s\n\n### Missing evidence\n%s\n\nPR: %s\n' "$DECISION" "$SUMMARY" "$EVIDENCE" "$MISSING" "$PR_URL" > /tmp/comment.md
+          gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body-file /tmp/comment.md
+          for label in state:verification agent:auditor ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label "$label" >/dev/null 2>&1 || true; done
+
+          if [ "$DECISION" = 'fail' ]; then
+            gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null
+            exit 0
+          fi
+          if [ "$DECISION" = 'human_required' ]; then
+            gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
+            exit 0
+          fi
+
+          case "$RISK" in
+            critical*|high*) HUMAN=1 ;;
+            *) HUMAN=0 ;;
+          esac
+          if [ "$SHARED" = 'true' ]; then HUMAN=1; fi
+
+          if [ "$HUMAN" = '1' ]; then
+            gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
+            gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body "All automated gates passed. Human merge approval is required because this item is high/critical risk or changes a shared package."
+            exit 0
+          fi
+
+          gh pr ready "$PR_NUMBER" --repo "$TARGET_REPO" >/dev/null 2>&1 || true
+          if gh pr merge "$PR_NUMBER" --repo "$TARGET_REPO" --squash --delete-branch; then
+            for label in state:implementation state:review state:qa state:verification state:human-decision state:blocked agent:developer agent:reviewer agent:qa agent:auditor ai:retry human:required; do gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label "$label" >/dev/null 2>&1 || true; done
+            gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:done' >/dev/null
+            gh issue close "$ISSUE_NUMBER" --repo "${{ github.repository }}" --comment "All AI-SDLC gates passed and $PR_URL was squash-merged. Work item complete."
+          else
+            gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
+            gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body "All automated gates passed, but GitHub could not complete the merge (for example branch protection or repository policy). Human action is required."
+          fi
