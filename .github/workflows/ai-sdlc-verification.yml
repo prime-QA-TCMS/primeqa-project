@@ -29,13 +29,14 @@ jobs:
             const runnable = issue.state === 'open'
               && labels.includes('state:verification')
               && labels.includes('agent:auditor')
+              && !labels.includes('ai:stop')
               && !labels.includes('state:done')
               && !labels.includes('state:human-decision')
               && !labels.includes('state:implementation')
               && !labels.includes('state:review')
               && !labels.includes('state:qa');
             core.setOutput('run', runnable ? 'true' : 'false');
-            if (!runnable) core.notice(`Skipping stale verification event for issue #${n}; current labels: ${labels.join(', ')}`);
+            if (!runnable) core.notice(`Skipping stale/stopped verification event for issue #${n}; current labels: ${labels.join(', ')}`);
 
       - name: Checkout control plane
         if: steps.guard.outputs.run == 'true'
@@ -57,10 +58,7 @@ jobs:
             const {data: comments} = await github.rest.issues.listComments({owner: context.repo.owner, repo: context.repo.repo, issue_number: n, per_page: 100});
             const text = [...comments].reverse().map(c => c.body || '').join('\n');
             const m = text.match(/Implementation PR (?:created|ready for independent review):\s*(https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+))/);
-            if (!m) {
-              core.setFailed('No implementation PR found');
-              return;
-            }
+            if (!m) { core.setFailed('No implementation PR found'); return; }
             const section = (heading) => {
               const body = issue.body || '';
               const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -148,8 +146,8 @@ jobs:
         run: |
           LIVE_STATE=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.state')
           LIVE_LABELS=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '[.labels[].name] | join(",")')
-          if [ "$LIVE_STATE" != 'open' ] || [[ ",$LIVE_LABELS," != *",state:verification,"* ]] || [[ ",$LIVE_LABELS," != *",agent:auditor,"* ]]; then
-            echo "Stale verification run; current state=$LIVE_STATE labels=$LIVE_LABELS. Exiting without mutation."
+          if [ "$LIVE_STATE" != 'open' ] || [[ ",$LIVE_LABELS," == *",ai:stop,"* ]] || [[ ",$LIVE_LABELS," != *",state:verification,"* ]] || [[ ",$LIVE_LABELS," != *",agent:auditor,"* ]]; then
+            echo "Stale/stopped verification run; current state=$LIVE_STATE labels=$LIVE_LABELS. Exiting without mutation."
             exit 0
           fi
 
@@ -164,9 +162,7 @@ jobs:
           for label in state:verification agent:auditor ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label "$label" >/dev/null 2>&1 || true; done
 
           case "$DECISION" in
-            implementation_failure)
-              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null
-              exit 0 ;;
+            implementation_failure) gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null; exit 0 ;;
             evidence_failure)
               case "$ROUTE" in
                 review) gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:review,agent:reviewer' >/dev/null ;;
@@ -175,9 +171,7 @@ jobs:
                 *) gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null ;;
               esac
               exit 0 ;;
-            human_required)
-              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
-              exit 0 ;;
+            human_required) gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null; exit 0 ;;
           esac
 
           case "$RISK" in critical*|high*) HUMAN=1 ;; *) HUMAN=0 ;; esac
