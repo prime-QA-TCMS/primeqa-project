@@ -24,18 +24,11 @@ jobs:
           github-token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           script: |
             const n = context.payload.issue.number;
-            const {data: issue} = await github.rest.issues.get({owner: context.repo.owner, repo: context.repo.repo, issue_number: n});
+            const {data: issue} = await github.rest.issues.get({owner: context.repo.owner, repo: context.repo.repo, issue_number:n});
             const labels = issue.labels.map(x => typeof x === 'string' ? x : x.name);
-            const runnable = issue.state === 'open'
-              && labels.includes('state:qa')
-              && labels.includes('agent:qa')
-              && !labels.includes('state:done')
-              && !labels.includes('state:human-decision')
-              && !labels.includes('state:implementation')
-              && !labels.includes('state:review')
-              && !labels.includes('state:verification');
+            const runnable = issue.state === 'open' && labels.includes('state:qa') && labels.includes('agent:qa') && !labels.includes('ai:stop');
             core.setOutput('run', runnable ? 'true' : 'false');
-            if (!runnable) core.notice(`Skipping stale QA event for issue #${n}; current labels: ${labels.join(', ')}`);
+            if (!runnable) core.notice(`Skipping stale/stopped QA event for issue #${n}; labels=${labels.join(',')}`);
 
       - name: Checkout control plane
         if: steps.guard.outputs.run == 'true'
@@ -55,10 +48,7 @@ jobs:
             const {data: comments} = await github.rest.issues.listComments({owner: context.repo.owner, repo: context.repo.repo, issue_number: n, per_page: 100});
             const text = [...comments].reverse().map(c => c.body || '').join('\n');
             const m = text.match(/Implementation PR (?:created|ready for independent review):\s*(https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+))/);
-            if (!m) {
-              core.setFailed('No implementation PR found in work-item comments');
-              return;
-            }
+            if (!m) { core.setFailed('No implementation PR found in work-item comments'); return; }
             core.setOutput('pr_url', m[1]);
             core.setOutput('repo', m[2]);
             core.setOutput('pr_number', m[3]);
@@ -73,7 +63,6 @@ jobs:
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
         run: |
           gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
-          gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments?per_page=100" --jq '.[] | {created_at,body}' > /tmp/primeqa-work-item-comments.jsonl
           gh api "/repos/$TARGET_REPO/pulls/$PR_NUMBER" > /tmp/pr.json
           gh api "/repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" --jq '.[] | {filename,status,additions,deletions,changes,patch}' > /tmp/pr-files.jsonl
           SHA=$(jq -r '.head.sha' /tmp/pr.json)
@@ -104,12 +93,11 @@ jobs:
           prompt: |
             You are the independent QA Analyst for Prime QA. Do not modify files.
             Read AGENTS.md, requirements/technical-requirements.md, ai-sdlc/definition-of-done.md,
-            /tmp/primeqa-work-item.md, /tmp/primeqa-work-item-comments.jsonl, /tmp/pr-files.jsonl and
-            /tmp/ci-summary.json. Inspect the implementation under _target. Determine whether acceptance criteria have
-            adequate automated/unit/API/UI/integration coverage for the change, whether existing checks provide credible
-            evidence, and whether regression/error/security-relevant behavior is tested. Do not pass merely because CI is green.
-            Return changes_required for implementable test/quality gaps and human_required only for a genuine
-            decision/environment dependency that cannot be resolved from evidence.
+            /tmp/primeqa-work-item.md, /tmp/pr-files.jsonl and /tmp/ci-summary.json. Inspect the implementation under _target.
+            Determine whether acceptance criteria have adequate automated/unit/API/UI/integration coverage for the change,
+            whether existing checks provide credible evidence, and whether regression/error/security-relevant behavior is tested.
+            Do not pass merely because CI is green. Return changes_required for implementable test/quality gaps and
+            human_required only for a genuine decision/environment dependency that cannot be resolved from evidence.
 
       - name: Update work-item state
         if: steps.guard.outputs.run == 'true'
@@ -119,10 +107,9 @@ jobs:
           QA_JSON: ${{ steps.codex.outputs.final-message }}
           PR_URL: ${{ steps.resolve.outputs.pr_url }}
         run: |
-          LIVE_STATE=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.state')
           LIVE_LABELS=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '[.labels[].name] | join(",")')
-          if [ "$LIVE_STATE" != 'open' ] || [[ ",$LIVE_LABELS," != *",state:qa,"* ]] || [[ ",$LIVE_LABELS," != *",agent:qa,"* ]]; then
-            echo "Stale QA run; current state=$LIVE_STATE labels=$LIVE_LABELS. Exiting without mutation."
+          if [[ ",$LIVE_LABELS," == *",ai:stop,"* ]] || [[ ",$LIVE_LABELS," != *",state:qa,"* ]] || [[ ",$LIVE_LABELS," != *",agent:qa,"* ]]; then
+            echo "Stale/stopped QA run; labels=$LIVE_LABELS"
             exit 0
           fi
           printf '%s' "$QA_JSON" > /tmp/qa.json
@@ -136,12 +123,9 @@ jobs:
           case "$DECISION" in
             pass)
               gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label ai:retry >/dev/null 2>&1 || true
-              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:verification,agent:auditor' >/dev/null
-              ;;
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:verification,agent:auditor' >/dev/null ;;
             changes_required)
-              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null
-              ;;
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null ;;
             human_required)
-              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
-              ;;
+              gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null ;;
           esac
