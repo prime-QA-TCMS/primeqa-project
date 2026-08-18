@@ -22,6 +22,10 @@ on:
       PRIMEQA_AUTOMATION_TOKEN:
         required: true
 
+concurrency:
+  group: primeqa-worker-${{ github.repository }}-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
 jobs:
   implement:
     runs-on: ubuntu-latest
@@ -31,6 +35,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
       - name: Checkout control plane
         uses: actions/checkout@v5
         with:
@@ -38,15 +43,37 @@ jobs:
           token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           path: _control
           persist-credentials: false
+
       - run: echo '_control/' >> .git/info/exclude
-      - name: Fetch central work item
+
+      - name: Live-state guard
+        id: guard
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           CONTROL_REPO: ${{ inputs.control_repo }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
-        run: gh api "/repos/$CONTROL_REPO/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+        run: |
+          STATE=$(gh api "/repos/$CONTROL_REPO/issues/$ISSUE_NUMBER" --jq '.state')
+          LABELS=$(gh api "/repos/$CONTROL_REPO/issues/$ISSUE_NUMBER" --jq '[.labels[].name] | join(",")')
+          if [ "$STATE" != 'open' ] || [[ ",$LABELS," != *",state:implementation,"* ]] || [[ ",$LABELS," != *",agent:developer,"* ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Stale worker event; current state=$STATE labels=$LABELS"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch central work item and lifecycle evidence
+        if: steps.guard.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          CONTROL_REPO: ${{ inputs.control_repo }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          gh api "/repos/$CONTROL_REPO/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+          gh api "/repos/$CONTROL_REPO/issues/$ISSUE_NUMBER/comments?per_page=100" --jq '.[] | {created_at,body}' > /tmp/primeqa-work-item-comments.jsonl
 
       - name: Resume existing AI PR when present
+        if: steps.guard.outputs.run == 'true'
         id: existing
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
@@ -69,15 +96,19 @@ jobs:
           BRANCH=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefName --jq '.headRefName')
           git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH"
           git checkout -B "$BRANCH" FETCH_HEAD
+          gh api "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" --jq '.[] | {created_at,body}' > /tmp/primeqa-pr-comments.jsonl || true
+          gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100" --jq '.[] | {state,submitted_at,body,user:.user.login}' > /tmp/primeqa-pr-reviews.jsonl || true
           echo 'found=true' >> "$GITHUB_OUTPUT"
           echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Preinstall Node dependencies when lockfile exists
-        if: ${{ hashFiles('package-lock.json') != '' }}
+        if: steps.guard.outputs.run == 'true' && hashFiles('package-lock.json') != ''
         run: npm ci --no-audit --no-fund
 
       - name: Run Codex implementation agent
+        if: steps.guard.outputs.run == 'true'
         id: codex
         uses: openai/codex-action@v1
         with:
@@ -88,14 +119,17 @@ jobs:
             You are the Developer agent in the Prime QA automated SDLC.
             Read _control/AGENTS.md, _control/requirements/technical-requirements.md,
             _control/ai-sdlc/README.md, _control/ai-sdlc/agents.md,
-            _control/ai-sdlc/definition-of-done.md and /tmp/primeqa-work-item.md.
+            _control/ai-sdlc/definition-of-done.md, /tmp/primeqa-work-item.md and
+            /tmp/primeqa-work-item-comments.jsonl.
+            If /tmp/primeqa-pr-comments.jsonl or /tmp/primeqa-pr-reviews.jsonl exists, read those too.
             Implement ONLY this repository's required work. Do not invent unresolved requirements.
-            Respect service/shared-package boundaries. If this is a retry, inspect existing branch changes and
-            address review/QA findings recorded on the linked work item/PR rather than starting over.
+            Respect service/shared-package boundaries. On retries, explicitly address the latest review/QA/auditor
+            findings from the lifecycle evidence; do not rely only on the issue body or start over.
             Add/update appropriate tests and documentation. Run applicable checks with installed dependencies.
             Do not commit, push, merge, deploy, or modify the _control checkout.
 
       - name: Commit and open/update implementation PR
+        if: steps.guard.outputs.run == 'true'
         id: pr
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
@@ -127,7 +161,7 @@ jobs:
           echo 'created=true' >> "$GITHUB_OUTPUT"
 
       - name: Advance central item to review
-        if: steps.pr.outputs.created == 'true'
+        if: steps.guard.outputs.run == 'true' && steps.pr.outputs.created == 'true'
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           CONTROL_REPO: ${{ inputs.control_repo }}
@@ -139,3 +173,15 @@ jobs:
           for label in state:implementation agent:developer ai:running ai:ready ai:retry; do gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --remove-label "$label" >/dev/null 2>&1 || true; done
           gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --add-label 'state:review,agent:reviewer' >/dev/null
           if [ "$SHARED" = 'true' ]; then gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --add-label 'shared-package' >/dev/null; fi
+
+      - name: Fail safe when retry produces no changes
+        if: steps.guard.outputs.run == 'true' && steps.pr.outputs.created == 'false' && steps.existing.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
+          CONTROL_REPO: ${{ inputs.control_repo }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          PR_URL: ${{ steps.existing.outputs.url }}
+        run: |
+          for label in state:implementation agent:developer ai:running ai:ready ai:retry; do gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --remove-label "$label" >/dev/null 2>&1 || true; done
+          gh issue edit "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --add-label 'state:human-decision,human:required' >/dev/null
+          gh issue comment "$ISSUE_NUMBER" --repo "$CONTROL_REPO" --body "Developer retry produced no repository changes after reading the recorded review/QA findings for $PR_URL. Automation stopped instead of leaving the work item stuck; human review is required."
