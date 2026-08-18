@@ -14,6 +14,10 @@ permissions:
   issues: write
   contents: read
 
+concurrency:
+  group: ai-sdlc-orchestrator-${{ github.event.issue.number || github.event.inputs.issue_number }}
+  cancel-in-progress: false
+
 jobs:
   dispatch:
     if: >-
@@ -37,14 +41,12 @@ jobs:
               core.setFailed(`Invalid issue number: ${rawIssueNumber || '<empty>'}`);
               return;
             }
-
             const {data: issue} = await github.rest.issues.get({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber});
             const labels = issue.labels.map(x => typeof x === 'string' ? x : x.name);
             if (!labels.includes('ai:managed')) { core.setFailed('Issue is not ai:managed'); return; }
             if (labels.includes('ai:stop')) { core.setFailed('Automation stopped for this item'); return; }
             if (labels.includes('human:required') || labels.includes('state:human-decision')) { core.setFailed('Human decision required before dispatch'); return; }
             if (labels.includes('ai:running')) { core.setFailed('Item already has an active automation run'); return; }
-
             const section = (heading) => {
               const body = issue.body || '';
               const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -56,11 +58,9 @@ jobs:
             if (targets.length !== 1) { core.setFailed('Autonomous Repo Tasks require exactly one target repo. Decompose cross-repo work first.'); return; }
             const target = targets[0];
             if (!/^prime-QA-TCMS\/[A-Za-z0-9_.-]+$/.test(target)) { core.setFailed(`Invalid target repo: ${target}`); return; }
-
             core.setOutput('issue_number', String(issueNumber));
             core.setOutput('target_repo', target);
             core.setOutput('issue_url', issue.html_url);
-
             for (const name of labels.filter(x => x?.startsWith('state:') || x?.startsWith('agent:'))) {
               await github.rest.issues.removeLabel({owner: context.repo.owner, repo: context.repo.repo, issue_number: issueNumber, name}).catch(()=>{});
             }
@@ -77,6 +77,8 @@ jobs:
           ISSUE_URL: ${{ steps.item.outputs.issue_url }}
         run: |
           test -n "$GH_TOKEN" || { echo 'Missing PRIMEQA_AUTOMATION_TOKEN'; exit 1; }
+          LABELS=$(gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '[.labels[].name] | join(",")')
+          if [[ ",$LABELS," == *",ai:stop,"* ]]; then echo 'Hard stop detected before dispatch'; exit 0; fi
           gh api --method POST "/repos/$TARGET_REPO/dispatches" \
             -f event_type='primeqa-codex-task' \
             -f "client_payload[control_repo]=${{ github.repository }}" \
