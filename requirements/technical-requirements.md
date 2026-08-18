@@ -1,323 +1,396 @@
 # Prime QA TCMS — Technical Requirements Baseline
 
-Status: **Consolidated baseline**  
+Status: **Owner-approved baseline**  
 Last updated: **2026-08-18**
 
-This document consolidates technical requirements and architectural decisions previously established for Prime QA TCMS. It distinguishes confirmed requirements from implementation details that still require validation. Where prior direction is incomplete, the requirement links conceptually to `requirements/open-questions.md` rather than inventing a decision.
+This document is the authoritative consolidated technical/product-architecture baseline for Prime QA TCMS. Requirements below reflect explicit owner decisions unless marked for analysis. Agents must not weaken or reinterpret them silently.
 
-## 1. System intent
+## 1. Product and access model
 
-Prime QA is a modular Test Case Management System (TCMS) intended to support test-management workflows while remaining maintainable, extensible, automatable, and suitable for self-hosted use.
+### TR-ROLE-001 — Default roles
+Prime QA ships with five default roles:
 
-The system must be designed so that UI, API services, shared libraries, and QA automation remain independently maintainable while conforming to common standards.
+- **Admin** — instance-level full access; may perform any system action and manage instance configuration.
+- **Lead QA** — may create and fully manage projects within granted scope.
+- **Tester** — may manage test results and comment on test cases and results.
+- **Developer** — read-only access to relevant project results and may comment on results.
+- **Stakeholder** — report-view access to relevant projects.
 
-## 2. Architectural style
+Detailed permission matrices must preserve these defaults and apply server-side authorization.
 
-### TR-ARCH-001 — Modular service architecture
+### TR-ROLE-002 — Hierarchical governance
+Where a capability supports hierarchy, authority flows from **Instance Admin → Tenant (when enabled) → Project Lead**. Lower scopes may configure only within constraints permitted by the parent scope.
 
-Backend capabilities are separated into independently maintained services rather than implemented as one monolithic backend.
+## 2. Service architecture
 
-Current service boundaries include:
+### TR-ARCH-001 — Strict separation of responsibility
+Backend capabilities must use independently deployable services with complete division of responsibility. Existing services are:
 
-- `user-service`
-- `project-service`
-- `testcase-service`
-- `results-service`
-- `configuration-service`
+- user
+- project
+- testcase
+- results
+- configuration
 
-Service responsibilities must remain explicit. Cross-service logic must not be duplicated casually when it belongs in a shared contract or common utility.
+Dedicated bounded services are also required for:
 
-### TR-ARCH-002 — Shared API standardization package
+- reporting
+- audit/history
+- notifications
+- integrations
+- attachments/files
+- import/export
 
-All backend services must use `primeqa-common` / the published `prime-qa-api-common` package for reusable API standards where applicable.
+Additional boundaries may be proposed only where analysis demonstrates a distinct responsibility.
 
-Its architectural purpose is to centralize reusable backend concerns such as:
+### TR-ARCH-002 — Shared backend standardization
+`primeqa-common` / `prime-qa-api-common` is the mandatory common backend standardization package. It owns reusable platform concerns including:
 
-- shared types and contracts
-- middleware
-- validation helpers
-- authentication/authorization helpers where common
-- HTTP/API response conventions where common
-- error-handling conventions
-- logging/request middleware where common
-- security middleware/configuration where common
+- error/exception model
+- response envelopes
+- validation helpers/schemas
+- authentication/JWT utilities
+- common middleware
+- logging and correlation IDs
+- request context
+- environment/config loading
+- health/readiness standards
+- pagination/filter/sort utilities
+- shared DTOs/types
+- security middleware/defaults
+- retry/idempotency helpers
+- database connection abstractions/helpers
 
-A service should not create a competing local implementation of a concern already standardized by the shared package unless there is a documented reason.
+Domain-specific business logic remains in its owning service.
 
-Changes to shared utilities are cross-service changes and require compatibility assessment.
+### TR-ARCH-003 — Shared frontend component platform
+`fog-ui` owns **all UI components** and frontend component standards. `primeQA-UI` composes those components into TCMS pages, routing, state and business workflows.
 
-### TR-ARCH-003 — Shared UI component library
+Every `fog-ui` component must be:
 
-Reusable UI primitives and custom components must live in the separate `fog-ui` repository/package rather than being duplicated across the application UI.
+- automation-ready with stable semantic/test interfaces
+- accessible
+- theme/design-token compatible
+- documented in an easy-to-read component catalogue
+- accompanied by practical how-to guides/examples
+- independently covered by its own unit/component tests
 
-`primeQA-UI` is the product application. `fog-ui` is the reusable component/design primitive layer.
+The catalogue must make component purpose, states, variants, usage, accessibility behaviour and automation hooks easy to understand.
 
-New reusable components should be implemented in `fog-ui` when they are sufficiently generic. Product-specific composition and business workflows remain in `primeQA-UI`.
+### TR-ARCH-004 — UI tooling changes are evidence-driven
+The main UI must not be migrated from `react-scripts` to Vite merely for preference. Technical analysis should assess migration risk, dependency health, maintainability, performance and `fog-ui` compatibility and propose migration only when justified.
 
-Changes to `fog-ui` must consider backwards compatibility for the consuming UI.
+## 3. API architecture
 
-### TR-ARCH-004 — Shared code must have clear ownership boundaries
+### TR-API-001 — REST with optional GraphQL
+REST is the default API style. GraphQL is an optional platform-wide capability controlled by instance/master configuration. The precise configuration mechanism must be finalized by architecture/configuration analysis.
 
-`primeqa-common` is for backend/API standardization. `fog-ui` is for frontend component standardization. Neither repository should become a general dumping ground for unrelated product business logic.
+### TR-API-002 — Mandatory API versioning and standardization
+All APIs must be explicitly versioned and standardized across services through `primeqa-common`, including contracts, errors, validation, pagination, filtering, sorting, authentication/security handling, logging/correlation, health/readiness and common DTO conventions.
 
-## 3. Technology baseline
+### TR-API-003 — Resilience and idempotency
+APIs must tolerate transient environment/dependency downtime and retry safely. Retry-sensitive writes must be idempotent and must not create duplicate records because a client or integration retried after a timeout/outage.
 
-### TR-TECH-001 — Primary language
+### TR-API-004 — Security
+APIs must use strict authentication/authorization, boundary validation, secure defaults, rate/abuse controls where appropriate, secure headers, secret handling, auditability, dependency security and protections against relevant OWASP web/API attack classes.
 
-TypeScript is the primary implementation language for the UI, backend services, shared libraries, and QA automation unless a documented architectural decision explicitly justifies an exception.
+### TR-API-005 — Contracts and documentation
+Contracts must be explicit, typed where practical, machine/human readable and regression tested. OpenAPI/Swagger remains the REST documentation baseline unless superseded by an approved ADR.
 
-### TR-TECH-002 — Frontend
+## 4. Authentication and tenancy
 
-The current frontend baseline is React with TypeScript.
+### TR-AUTH-001 — Configurable authentication methods
+Prime QA must support combinations of local credentials and enterprise identity methods including SSO/OAuth/OIDC and LDAP/Active Directory. Enabled methods are instance configuration managed by Admin through the UI. Multiple methods may coexist. MFA must be supported where the selected identity mechanism allows it.
 
-The application currently uses a modern React ecosystem including routing, Redux Toolkit, React Hook Form, i18n, schema validation, charting, and reusable components through `fog-ui`.
+Identity linking, token/session lifecycle, revocation and provider-disable behaviour require detailed security design but must conform to the configured role/permission model.
 
-Existing implementation choices should be preserved unless current-state analysis identifies a material reason to migrate them.
+### TR-TEN-001 — Optional client tenancy
+Tenancy is an optional feature enabled/disabled by Instance Admin. Its primary use case is freelance QA managing different clients.
 
-### TR-TECH-003 — Backend
+When enabled:
 
-Backend services use Node.js, TypeScript, Express, and MongoDB through Mongoose as the current architectural baseline.
+- a tenant represents a client workspace;
+- each tenant supports multiple projects;
+- tenant data must be strictly isolated from other tenants;
+- tenant-level configuration is subordinate to instance configuration.
 
-Services expose HTTP APIs and must maintain consistent contracts and behaviour using the shared API package where applicable.
+When disabled, the instance behaves as a single workspace without forcing tenant concepts into user workflows.
 
-### TR-TECH-004 — API documentation
+## 5. Configuration and versioning
 
-Service APIs should expose or maintain machine/human-readable API documentation. The current implementation includes Swagger/OpenAPI tooling and this should be treated as the baseline unless superseded by an ADR.
+### TR-CONF-001 — Hierarchical configuration
+Configuration follows **Instance → Tenant → Project** where applicable. Lower scopes cannot exceed restrictions imposed above them.
 
-### TR-TECH-005 — Containerized/self-hosted operation
+### TR-CONF-002 — Configuration history feature
+Configuration/rule version history is an optional feature toggled by Instance Admin. When enabled it must:
 
-The product must support self-hosted deployment. Backend repositories already show container/Docker-oriented execution patterns and the completed system should have a documented repeatable deployment model.
+- retain the current version plus up to three prior versions (owner wording implies three historical versions; confirm during implementation);
+- record who changed it and when;
+- expose historical versions read-only;
+- provide side-by-side comparison;
+- allow authorized revert;
+- record a revert as a new change rather than rewriting history.
 
-Deployment must not require hidden developer-machine state.
+## 6. Data lifecycle
 
-## 4. Repository and dependency boundaries
+### TR-DATA-001 — Configurable retention
+Retention is configured by Instance Admin rather than hard-coded. Tenant retention may be configured where tenancy is enabled but **may never exceed instance-level limits**.
 
-### TR-REP-001 — Product repositories
+The retention model has three distinct policy classes:
 
-The system currently consists of:
+1. **Archive rule** — when eligible live data is archived.
+2. **Permanent-delete rule** — when eligible data is irreversibly deleted.
+3. **Attachment rule** — lifecycle for file attachments.
 
-- `primeQA-UI` — main frontend application
-- `primeqa-common` — shared backend/API utilities, middleware and types
-- `fog-ui` — reusable frontend component library
-- `user-service` — user/authentication domain
-- `project-service` — project domain
-- `testcase-service` — test-case domain
-- `results-service` — execution/results domain
-- `configuration-service` — configuration domain
-- `primeqa-project` — programme control plane and source of approved cross-repository requirements/architecture
+Policies should support data-class-specific treatment where necessary.
 
-### TR-REP-002 — QA automation repositories
+### TR-DATA-002 — External archive provider required
+Archive data is pushed out of the live data store to an Admin-configured external storage provider such as OneDrive or another supported cloud/object-storage provider. If no valid archive destination is configured, archival is unavailable.
 
-QA automation is intentionally separated into three repositories:
+An archive operation must preserve traceability/restoration metadata. Live data must never be removed as a consequence of an archive operation until successful durable archival has been verified. Failed archive operations must not cause data loss.
 
-- `primeqa-qa-ui-engine` — reusable browser/UI execution engine
-- `primeqa-qa-api-engine` — reusable API execution engine
-- `primeqa-qa-test-automation` — TCMS test cases, business flows, orchestration, assertions and reporting
+### TR-DATA-003 — Deletion
+Deletion is soft-delete by default. Authorized users may explicitly hard-delete where permissions permit. Instance Admin configures automatic permanent purging of aged soft-deleted records.
 
-The two engines must remain independent from one another. The central test-automation repository depends on both.
+Deletion/purge must preserve required historical/reference integrity and must not make retained execution history uninterpretable.
 
-### TR-REP-003 — Business scenarios do not belong in engines
+### TR-DATA-004 — Document database abstraction
+Persistence must support MongoDB and Mongo-compatible/document-oriented databases such as Azure Cosmos DB where technically compatible. Database connection concerns should be abstracted through the common backend layer rather than hard-coded into domains.
 
-The UI and API QA engines must provide generic execution primitives. TCMS-specific test scenarios, workflows, data builders, assertions, and cross-layer state live in `primeqa-qa-test-automation`.
+## 7. Self-hosting and deployment
 
-## 5. API requirements
+### TR-DEP-001 — Unlimited self-hosted users
+Self-hosted Prime QA has no software-imposed user-count limit.
 
-### TR-API-001 — Consistency across services
+A future managed/hosted offering may enforce tier-based user limits controlled by the hosting provider. Hosted licensing/tier enforcement is **out of scope for the initial project** and must not constrain the self-hosted core.
 
-All APIs should follow shared conventions for request validation, authentication, error responses, status handling, logging and common headers where those concerns are standardized by `primeqa-common`.
+### TR-DEP-002 — Deploy-to-server experience
+GitHub distribution should provide a **Deploy to my server** flow/button where the operator supplies deployment details.
 
-### TR-API-002 — Explicit contracts
+### TR-DEP-003 — First-run database configuration
+If Prime QA cannot connect to a valid document database on initial run, it must provide an Admin configuration wizard to configure and test the database connection before the instance becomes operational. Credentials must be handled securely and never exposed client-side.
 
-API request and response contracts must be explicit, typed where possible, documented, and regression tested.
+### TR-DEP-004 — Independent deployment plus Deploy All
+Every backend service remains independently deployable and independently scalable. Deployment tooling must also provide a **Deploy All** option that orchestrates the complete stack without turning it into a monolithic process.
 
-Breaking contract changes must be deliberate and assessed across all consumers, including the UI and QA automation.
+## 8. Reporting
 
-### TR-API-003 — Validation and error handling
+### TR-REP-001 — ISTQB-aligned reporting
+Default reporting/scorecards should be derived from appropriate ISTQB test-reporting principles/standards. The exact default metric/report catalogue should be established by QA/business analysis and documented rather than guessed.
 
-Invalid input must fail predictably with standardized validation/error behaviour. Services must not silently accept malformed or ambiguous input.
+### TR-REP-002 — Custom reports
+Users must be able to define custom reports within their permitted scope.
 
-### TR-API-004 — Authorization enforcement
+### TR-REP-003 — Report access hierarchy
+Reporting access/configuration follows **Instance Admin → Tenant (if applicable) → Project Lead**. Lower levels cannot grant access prohibited by the parent level.
 
-Authorization must be enforced by the API, not only hidden or disabled in the UI.
+## 9. Test design and execution model
 
-### TR-API-005 — Cross-service integrity
+### TR-TEST-001 — Master planning hierarchy
+The master test-design hierarchy is:
 
-Where a workflow spans multiple services, IDs, ownership boundaries, lifecycle states and failure behaviour must be explicit. Cross-service consistency must be covered by integration/API automation.
+**Project → Suite → Section (optional) → Test Case**
 
-## 6. Frontend requirements
+Suites and test cases are planning/master entities. There is one logical current instance of each plus version history; executions reference them rather than duplicating master definitions.
 
-### TR-UI-001 — Reuse over duplication
+### TR-TEST-002 — Test-case versioning
+Test cases are versioned. The system must record who changed them and when, support read-only historical viewing, side-by-side comparison and authorized revert. Revert creates a new version rather than rewriting history.
 
-The application UI should consume `fog-ui` for reusable custom components and primitives instead of implementing visually/functionally equivalent components repeatedly in `primeQA-UI`.
+Every execution/result must permanently reference the exact test-case version executed. The number of historical test-case versions retained remains to be confirmed.
 
-### TR-UI-002 — Product logic stays in the application
+### TR-TEST-003 — Run model
+A Run belongs to a Project and executes a **single Suite** (including its optional Sections and selected Test Cases). A Run has a custom name that defaults to the Suite name.
 
-Business-specific pages, workflows, state orchestration, permissions, and product behaviour belong in `primeQA-UI`, even when composed from `fog-ui` components.
+A whole Run may be assigned to a user.
 
-### TR-UI-003 — Stable automation interfaces
+### TR-TEST-004 — Plan model
+A Plan belongs to a Project, must have a custom name, and may contain multiple Suite execution configurations.
 
-Critical interactive elements must expose stable selectors/semantics suitable for automated testing. QA automation must not depend primarily on fragile CSS structure or visible text where a stable semantic/test identifier is appropriate.
+A Plan may include the **same master Suite multiple times**. Each inclusion is an execution configuration/reference, not a copied Suite. Each suite inclusion may:
 
-### TR-UI-004 — Internationalization baseline
+- carry optional execution configuration/context such as device, browser, environment, build/version or extensible parameters;
+- include all or a selected subset of Test Cases;
+- have a user assignment;
+- independently configure the same Suite differently from another inclusion.
 
-The existing UI includes i18n support. New UI work should not hard-code architecture that prevents localization.
+Example: the same Suite may appear as `Suite A (iPhone 11)` and `Suite A (Samsung Galaxy)` in one Plan.
 
-## 7. Data and persistence requirements
+### TR-TEST-005 — Hierarchical execution assignment
+Assignment can occur at:
 
-### TR-DATA-001 — MongoDB baseline
+- whole Run;
+- whole Plan;
+- Suite execution within a Plan;
+- Section within a Suite execution;
+- individual Test Case within a Suite execution.
 
-MongoDB/Mongoose is the current persistence baseline for services. Data ownership should follow service boundaries rather than allowing uncontrolled direct access to another service's internal persistence model.
+More-specific assignment overrides broader assignment for that execution scope.
 
-### TR-DATA-002 — Tenant-aware data
+### TR-TEST-006 — Results preserve execution context
+Results must preserve enough context to identify the Project, Run/Plan, Suite execution configuration, optional Section, Test Case, exact Test Case version, assignee where relevant and execution configuration/environment.
 
-Tenant/customer-scoped data must remain attributable to the correct tenant and must not leak across tenant boundaries.
+## 10. External automation
 
-The exact tenancy implementation and isolation model still require explicit verification/documentation.
+### TR-AUTO-001 — Admin-controlled integration
+External automation/result ingestion is enabled and configured by Instance Admin.
 
-### TR-DATA-003 — Data retention lifecycle
+### TR-AUTO-002 — Non-unique Automation ID
+Automation ID is an Admin-configured concept and is intentionally **not unique**. Multiple TCMS Test Cases may share one Automation ID because one automated test may cover multiple assertions/cases.
 
-The previously established retention direction is:
+### TR-AUTO-003 — Configurable creation and field mapping
+When automation integration is enabled, Instance Admin controls:
 
-1. Active operational data is retained for approximately **3 years** before archival where the data category is subject to the standard lifecycle.
-2. Archived data is retained for approximately **10 additional years**, after which it is deleted where the standard lifecycle applies.
-3. Some high-volume or low-value failure/transient data should have a **shorter retention period** rather than inheriting the full standard lifecycle.
-4. Retention must distinguish data classes rather than apply one blanket policy to all records.
+- whether automation may create its own execution data/context (including supported Runs/Plans/context records);
+- which incoming automation fields may update which Prime QA fields;
+- the permitted scope of automated writes.
 
-Retention design must explicitly account for at least:
+External systems cannot grant themselves additional write capability.
 
-- tenant/customer data
-- test execution/results data
-- failure/transient diagnostic data
-- scorecard/quality measurement data
-- rule/configuration data
-- mapping/reference data
+### TR-AUTO-004 — Shared-ID result propagation
+When one Automation ID maps to multiple Test Cases:
 
-Exact retention periods for the non-standard classes remain open until documented in the retention matrix.
+- a **pass** marks all matching cases as Passed;
+- for **failure/warning**, Instance Admin configures the propagation policy, e.g. fail all or set all to Review;
+- ingestion must remain idempotent so retries do not duplicate results/executions.
 
-### TR-DATA-004 — Archive is not delete
+## 11. External integrations
 
-Archival must preserve required historical usability/traceability. Deletion is a separate terminal lifecycle action.
+### TR-INT-001 — Required integration families
+The dedicated integration service must support an adapter-based architecture for at least:
 
-### TR-DATA-005 — Referential integrity across lifecycle changes
+- Jira
+- Azure Boards
+- GitHub Projects/Boards
+- GitHub
+- GitLab
+- Bitbucket
+- CI/CD systems
+- generic webhooks
+- Slack
+- Microsoft Teams
+- email notifications
 
-Archival or deletion of a record must not silently corrupt retained data that references it. Required mappings, historical labels/snapshots, or tombstone/reference strategies must be defined per data domain.
+Provider-specific logic should remain isolated from core domain services.
 
-## 8. Authentication, authorization and users
+## 12. Import/export and portability
 
-### TR-AUTH-001 — Dedicated user capability
+### TR-PORT-001 — Permissions
+- **Instance Admin:** may import/export everything, including system/instance configuration.
+- **Project Lead:** may import/export everything within projects they manage.
+- **Tester, Developer, Stakeholder:** no import/export capability by default.
 
-User and authentication concerns belong primarily in `user-service`, with common reusable auth helpers standardized through the shared backend package where appropriate.
+### TR-PORT-002 — Standard formats only
+Supported interchange mechanisms are standard formats/protocols only:
 
-### TR-AUTH-002 — Role/permission behaviour must be testable
+- CSV
+- Excel
+- JSON
+- XML
+- API-based transfer
 
-Permissions and role restrictions must have API-level enforcement and must be covered by automated tests at the appropriate API and UI layers.
+No proprietary Prime QA package/archive format is required.
 
-### TR-AUTH-003 — Self-hosted free-tier user limit
+## 13. Attachments
 
-A prior product direction is that self-hosted use is free for installations with **up to 5 users**.
+### TR-ATT-001 — Any file format
+Attachments may be any file format. Security controls may still apply file-size, malware scanning, safe-content handling and authorization rules; these are security controls, not business-format restrictions.
 
-The mechanism for enforcing, licensing, or merely defining this commercial boundary has not yet been technically specified and must not be invented by implementation agents.
+### TR-ATT-002 — Configurable storage backend
+Instance Admin selects the attachment storage backend. Supported models include:
 
-## 9. Quality and automation requirements
+- document database storage;
+- external cloud/object storage;
+- OneDrive;
+- SharePoint.
 
-### TR-QA-001 — Quality is part of delivery
+The attachment service abstracts the backend from consuming domains. Attachment lifecycle follows the configured attachment retention policy.
 
-QA is integrated throughout implementation. A change is not considered complete merely because code compiles or a manual happy path works.
+## 14. Audit
 
-### TR-QA-002 — Layered automation
+### TR-AUD-001 — Comprehensive audit trail
+Prime QA audits all material system activity, including projects, test cases, test results, version reverts, tenants, permissions, configuration, imports/exports, integrations, archive/delete operations and administrative actions.
 
-The project should maintain appropriate coverage across:
+Audit events must record at minimum:
 
-- unit/component tests
-- service/API tests
-- cross-service integration tests
-- UI/E2E tests
-- cross-layer tests that validate UI-created data through APIs and API-created data through the UI
-- appropriate non-functional tests
+- who performed the action;
+- what action occurred;
+- when it occurred;
+- affected entity/context;
+- relevant before/after state where applicable.
 
-### TR-QA-003 — Cross-layer verification
+Audit records are immutable to normal users and subject to configured retention policy.
 
-The automation architecture must support scenarios such as:
+Diagnostic/application logging and audit history are separate concerns; disabling ordinary logging must not silently disable mandatory auditability.
 
-- create via UI, validate via API
-- create via API, validate via UI
-- mutate via one layer, verify state through another
-- establish test state efficiently through API and validate user-visible behaviour in UI
+## 15. Non-functional requirements
 
-State/results may flow between the UI and API engines through the central test runner's execution context.
+### TR-NFR-001 — Scale targets
+Design targets per instance:
 
-### TR-QA-004 — Test engines remain generic
+- users: **1–10,000**
+- tenants: **0–100**
+- projects: **1,000+**
+- test cases: **100,000+**
+- results: **1,000,000+**
+- concurrent users: **1–5,000**
 
-Neither engine should understand TCMS business workflows. Business-level clients, page/workflow abstractions, test data and assertions are owned by `primeqa-qa-test-automation`.
+### TR-NFR-002 — Performance
+Normal API operations should target approximately **≤200 ms** response time. Responses approaching **1,000 ms** are acceptable only for genuinely large/complex returns. 1,000 ms is the intended upper bound for those large responses under supported operating conditions; detailed load-test acceptance profiles must be established from these targets.
 
-### TR-QA-005 — Deterministic tests
+### TR-NFR-003 — Availability
+Target uptime is **99%**.
 
-Automation should use isolated/unique test data where appropriate, avoid arbitrary sleeps, prefer stable selectors, produce diagnostic failure artifacts, and support smoke/regression/cross-layer classifications.
+### TR-NFR-004 — Backup/recovery
+Backup and recovery behaviour is configurable by Instance Admin. Technical design must define supported mechanisms and safe defaults.
 
-### TR-QA-006 — CI quality gates
+### TR-NFR-005 — Browser/device support
+The UI must support Chromium-family browsers, Firefox, Opera, embedded/in-app browsers where technically feasible, and responsive/mobile-friendly use.
 
-Repositories should have automated validation appropriate to their type, including build/type checks, tests, linting and relevant security/dependency controls.
+### TR-NFR-006 — Accessibility
+Accessibility must be implemented comprehensively wherever technically possible. Analysis must translate this into measurable conformance criteria (e.g. an appropriate WCAG target) rather than leaving acceptance subjective.
 
-## 10. Maintainability and code quality
+### TR-NFR-007 — Security posture
+The product must pursue the strongest reasonably achievable security posture. Security analysis must translate this into explicit standards, threat controls, verification and release gates rather than relying on the phrase alone.
 
-### TR-MNT-001 — Avoid duplicated platform standards
+### TR-NFR-008 — Configurable logging
+Instance Admin can configure diagnostic/application logging from very verbose/system-wide logging through selected categories/severity levels to no diagnostic logging. Mandatory audit/security records are governed separately and must not be disabled merely by setting application logging to none.
 
-Common backend concerns belong in `primeqa-common`; reusable UI components belong in `fog-ui`. Product repositories should consume these shared packages rather than fork copies.
+## 16. QA automation architecture
 
-### TR-MNT-002 — Backwards compatibility is a cross-repository concern
+### TR-QA-001 — QA repositories
+Automation is separated into:
 
-Changes to shared packages, API contracts, shared models, authentication behaviour, or reusable UI components require analysis of all consumers.
+- `primeqa-qa-ui-engine` — generic UI/browser execution engine;
+- `primeqa-qa-api-engine` — generic API execution engine;
+- `primeqa-qa-test-automation` — TCMS business scenarios, orchestration, assertions, data and reporting.
 
-### TR-MNT-003 — Architectural changes require rationale
+The two engines remain independent. The central runner depends on both.
 
-Agents/developers must not rewrite working architecture purely based on preference. Material changes require evidence of a requirement, defect, risk, scalability need, security issue, or maintainability benefit and should be recorded through an ADR where appropriate.
+### TR-QA-002 — Cross-layer verification
+The central runner must support UI→API and API→UI validation, shared execution state, cross-service workflows and result correlation.
 
-### TR-MNT-004 — Documentation follows behaviour
+### TR-QA-003 — Quality gates
+Repositories require appropriate unit/component/API/integration/UI automation, build/type/lint validation, security/dependency controls and traceable CI evidence.
 
-Public contracts, deployment procedures, environment variables, architecture decisions and operational expectations must remain synchronized with implementation.
+## 17. Analysis-required item
 
-## 11. Security and privacy baseline
+### TR-AN-001 — Mapping/reference data
+The previous concept of “mapping/reference data” is **not yet confirmed as a product requirement**. It must be investigated by four lenses before implementation:
 
-### TR-SEC-001 — No secrets in source
+1. **Business Analyst** — identify whether a real business workflow requires mapping/reference entities.
+2. **Architect** — determine whether mappings are needed for integrations, service boundaries, historical references, automation or integrity.
+3. **Technical Analyst** — inspect current schemas, APIs and code to determine what mapping currently means/does.
+4. **End-user/Product Analyst** — determine whether users need explicit mapping functionality and what problem it solves.
 
-Credentials, tokens, production data and secrets must not be committed to repositories.
+Output must contain evidence, recommendation and unresolved questions. Do not preserve or implement mapping solely because it appeared in earlier retention discussions.
 
-### TR-SEC-002 — Standardized service security
+## 18. Governance
 
-Reusable API security middleware/configuration should be centralized in the shared API package where practical to reduce inconsistent protection between services.
-
-### TR-SEC-003 — Input and access boundaries
-
-All externally supplied data must be validated at appropriate boundaries, and authorization must be checked server-side.
-
-### TR-SEC-004 — Tenant isolation
-
-Tenant data must not be accessible to another tenant through UI, API, identifier manipulation, search, reporting, exports, or automation/setup endpoints.
-
-## 12. Self-hosting and commercial boundary
-
-### TR-DEP-001 — Self-hostable product
-
-Prime QA must remain deployable by a customer/operator outside a centrally managed Prime QA SaaS environment.
-
-### TR-DEP-002 — Configuration must be externalized
-
-Environment-specific URLs, secrets, database connections, ports and runtime configuration should be provided through documented configuration/environment mechanisms rather than source modifications.
-
-### TR-DEP-003 — Commercial support must not contaminate architecture
-
-Previously discussed commercial options (paid setup and support) are service/commercial offerings. Core technical architecture should remain operable without requiring paid support.
-
-## 13. Traceability and completion
-
-### TR-GOV-001 — `primeqa-project` is the cross-repository source of truth
-
-Approved programme-level requirements, architecture and decisions belong in the project control-plane repository.
+### TR-GOV-001 — Source of truth
+`primeqa-project` is the authoritative cross-repository source for approved programme requirements and architecture.
 
 ### TR-GOV-002 — Evidence before completion
-
-Requirements/objectives must be traceable to implementation and validation evidence before being declared complete.
+Requirements/objectives must map to implementation and validation evidence before being marked complete.
 
 ### TR-GOV-003 — Unknowns remain explicit
-
-Anything marked unclear/open must not be silently converted into an implementation decision by Codex or another agent. Open matters must either be resolved by evidence from the current system or presented for owner decision.
+Implementation agents must not invent unresolved product behaviour. Remaining uncertainties are tracked in `requirements/open-questions.md` and resolved by owner decision, evidence or approved ADR as appropriate.
