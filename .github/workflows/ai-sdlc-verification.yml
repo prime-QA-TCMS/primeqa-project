@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Resolve work item and implementation PR
         id: resolve
@@ -48,13 +49,24 @@ jobs:
             core.setOutput('risk', section('Risk').toLowerCase());
             core.setOutput('shared', labels.includes('shared-package') ? 'true' : 'false');
 
-      - name: Fetch central work item
+      - name: Fetch complete verification evidence
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           ISSUE_NUMBER: ${{ steps.resolve.outputs.issue_number }}
-        run: gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+          TARGET_REPO: ${{ steps.resolve.outputs.repo }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+        run: |
+          gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" --jq '.body' > /tmp/primeqa-work-item.md
+          gh api "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments?per_page=100" --jq '.[] | {created_at,body}' > /tmp/work-item-comments.jsonl
+          gh api "/repos/$TARGET_REPO/pulls/$PR_NUMBER" > /tmp/pr.json
+          gh api "/repos/$TARGET_REPO/pulls/$PR_NUMBER/files?per_page=100" --jq '.[] | {filename,status,additions,deletions,changes,patch}' > /tmp/pr-files.jsonl
+          gh api "/repos/$TARGET_REPO/issues/$PR_NUMBER/comments?per_page=100" --jq '.[] | {created_at,body}' > /tmp/pr-comments.jsonl || true
+          gh api "/repos/$TARGET_REPO/pulls/$PR_NUMBER/reviews?per_page=100" --jq '.[] | {state,submitted_at,body,user:.user.login}' > /tmp/pr-reviews.jsonl || true
+          SHA=$(jq -r '.head.sha' /tmp/pr.json)
+          gh api "/repos/$TARGET_REPO/commits/$SHA/check-runs" > /tmp/checks.json || echo '{"check_runs":[]}' > /tmp/checks.json
+          jq '{total_count, checks: [.check_runs[] | {name,status,conclusion,html_url}]}' /tmp/checks.json > /tmp/ci-summary.json
 
-      - name: Checkout implementation PR
+      - name: Checkout implementation PR with full history
         uses: actions/checkout@v5
         with:
           repository: ${{ steps.resolve.outputs.repo }}
@@ -62,6 +74,13 @@ jobs:
           token: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           path: _target
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Produce deterministic diff evidence
+        working-directory: _target
+        run: |
+          git diff --name-status HEAD^1...HEAD > /tmp/pr-name-status.txt || true
+          git diff --stat HEAD^1...HEAD > /tmp/pr-diff-stat.txt || true
 
       - name: Objective Auditor
         id: codex
@@ -71,17 +90,21 @@ jobs:
           permission-profile: ':read-only'
           safety-strategy: drop-sudo
           output-schema: |
-            {"type":"object","properties":{"decision":{"type":"string","enum":["pass","fail","human_required"]},"summary":{"type":"string"},"acceptance_evidence":{"type":"array","items":{"type":"string"}},"missing_evidence":{"type":"array","items":{"type":"string"}}},"required":["decision","summary","acceptance_evidence","missing_evidence"],"additionalProperties":false}
+            {"type":"object","properties":{"decision":{"type":"string","enum":["pass","implementation_failure","evidence_failure","human_required"]},"evidence_route":{"type":"string","enum":["none","review","qa","verification","human"]},"summary":{"type":"string"},"acceptance_evidence":{"type":"array","items":{"type":"string"}},"missing_evidence":{"type":"array","items":{"type":"string"}}},"required":["decision","evidence_route","summary","acceptance_evidence","missing_evidence"],"additionalProperties":false}
           prompt: |
             You are the Objective Auditor, the final independent verification context in the Prime QA AI-SDLC.
             Do not edit code. Read AGENTS.md, requirements/technical-requirements.md,
-            ai-sdlc/definition-of-done.md, ai-sdlc/permissions-and-gates.md and /tmp/primeqa-work-item.md.
-            Inspect _target and the work-item evidence. Verify the observable acceptance criteria and Definition of Done,
-            not merely whether a PR exists. Return pass only when the requirement has sufficient implementation and
-            validation evidence. Return fail for remediable implementation/quality gaps, human_required for unresolved
-            product/security/destructive decisions or evidence that cannot be obtained autonomously.
+            ai-sdlc/definition-of-done.md, ai-sdlc/permissions-and-gates.md, /tmp/primeqa-work-item.md,
+            /tmp/work-item-comments.jsonl, /tmp/pr-comments.jsonl, /tmp/pr-reviews.jsonl,
+            /tmp/pr-files.jsonl, /tmp/ci-summary.json, /tmp/pr-name-status.txt and /tmp/pr-diff-stat.txt.
+            Inspect _target. Verify the observable acceptance criteria and Definition of Done using the complete evidence set.
+            Return pass only when implementation and evidence are sufficient.
+            Return implementation_failure only for a remediable defect in the implementation itself.
+            Return evidence_failure when implementation may be correct but a required review/QA/CI/traceability artifact is missing or insufficient.
+            For evidence_failure set evidence_route to review, qa, or verification depending on which gate should regenerate evidence.
+            Return human_required only for unresolved product/security/destructive decisions or evidence that cannot be obtained autonomously.
 
-      - name: Complete, retry, or escalate
+      - name: Complete, reroute, or escalate
         env:
           GH_TOKEN: ${{ secrets.PRIMEQA_AUTOMATION_TOKEN }}
           ISSUE_NUMBER: ${{ steps.resolve.outputs.issue_number }}
@@ -94,17 +117,37 @@ jobs:
         run: |
           printf '%s' "$VERDICT_JSON" > /tmp/verdict.json
           DECISION=$(jq -r '.decision' /tmp/verdict.json)
+          ROUTE=$(jq -r '.evidence_route' /tmp/verdict.json)
           SUMMARY=$(jq -r '.summary' /tmp/verdict.json)
           EVIDENCE=$(jq -r '.acceptance_evidence[]? | "- " + .' /tmp/verdict.json)
           MISSING=$(jq -r '.missing_evidence[]? | "- " + .' /tmp/verdict.json)
-          printf '## Objective verification\n\n**Decision:** %s\n\n%s\n\n### Acceptance evidence\n%s\n\n### Missing evidence\n%s\n\nPR: %s\n' "$DECISION" "$SUMMARY" "$EVIDENCE" "$MISSING" "$PR_URL" > /tmp/comment.md
+          printf '## Objective verification\n\n**Decision:** %s\n**Route:** %s\n\n%s\n\n### Acceptance evidence\n%s\n\n### Missing evidence\n%s\n\nPR: %s\n' "$DECISION" "$ROUTE" "$SUMMARY" "$EVIDENCE" "$MISSING" "$PR_URL" > /tmp/comment.md
           gh issue comment "$ISSUE_NUMBER" --repo "${{ github.repository }}" --body-file /tmp/comment.md
           for label in state:verification agent:auditor ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label "$label" >/dev/null 2>&1 || true; done
 
-          if [ "$DECISION" = 'fail' ]; then
+          if [ "$DECISION" = 'implementation_failure' ]; then
             gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:implementation,agent:developer,ai:retry' >/dev/null
             exit 0
           fi
+
+          if [ "$DECISION" = 'evidence_failure' ]; then
+            case "$ROUTE" in
+              review)
+                gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:review,agent:reviewer' >/dev/null
+                ;;
+              qa)
+                gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:qa,agent:qa' >/dev/null
+                ;;
+              verification|none)
+                gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:verification,agent:auditor' >/dev/null
+                ;;
+              *)
+                gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
+                ;;
+            esac
+            exit 0
+          fi
+
           if [ "$DECISION" = 'human_required' ]; then
             gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:human-decision,human:required' >/dev/null
             exit 0
@@ -124,7 +167,7 @@ jobs:
 
           gh pr ready "$PR_NUMBER" --repo "$TARGET_REPO" >/dev/null 2>&1 || true
           if gh pr merge "$PR_NUMBER" --repo "$TARGET_REPO" --squash --delete-branch; then
-            for label in state:implementation state:review state:qa state:verification state:human-decision state:blocked agent:developer agent:reviewer agent:qa agent:auditor ai:retry human:required; do gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label "$label" >/dev/null 2>&1 || true; done
+            for label in state:implementation state:review state:qa state:verification state:human-decision state:blocked agent:developer agent:reviewer agent:qa agent:auditor ai:retry human:required ai:running ai:ready; do gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --remove-label "$label" >/dev/null 2>&1 || true; done
             gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" --add-label 'state:done' >/dev/null
             gh issue close "$ISSUE_NUMBER" --repo "${{ github.repository }}" --comment "All AI-SDLC gates passed and $PR_URL was squash-merged. Work item complete."
           else
